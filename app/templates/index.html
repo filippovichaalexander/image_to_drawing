@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Векторизация архитектурных сканов в DXF/DWG по ГОСТ">
+  <title>Image → Drawing</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+  <div class="wrap">
+    <header class="topbar">
+      <div class="brand">
+        <strong>Image → Drawing</strong>
+        <span>Сканы и фото → DXF/DWG (СПДС / ГОСТ)</span>
+      </div>
+      <button type="button" class="btn btn-ghost" id="theme-toggle" aria-label="Переключить тему">Тема</button>
+    </header>
+
+    <form id="job-form" enctype="multipart/form-data" novalidate>
+      <div class="grid">
+        <section class="panel" aria-labelledby="drawings-title">
+          <h2 id="drawings-title">Чертежи</h2>
+          <p class="hint">Обязательно. JPEG, PNG, PDF, TIFF — drag-and-drop или выбор файла.</p>
+          <div class="drop" id="drawings-drop" role="button" tabindex="0" aria-controls="drawings-input">
+            <div>
+              <strong>Перетащите чертежи сюда</strong>
+              <p>или нажмите для выбора</p>
+            </div>
+            <input id="drawings-input" type="file" name="drawings" accept=".jpg,.jpeg,.png,.tif,.tiff,.pdf,image/*" multiple>
+          </div>
+          <ul class="files" id="drawings-list" aria-live="polite"></ul>
+        </section>
+
+        <section class="panel" aria-labelledby="photos-title">
+          <h2 id="photos-title">Фотографии здания</h2>
+          <p class="hint">Опционально. Для уточнения фасадов и проёмов.</p>
+          <div class="drop" id="photos-drop" role="button" tabindex="0" aria-controls="photos-input">
+            <div>
+              <strong>Перетащите фото сюда</strong>
+              <p>или нажмите для выбора</p>
+            </div>
+            <input id="photos-input" type="file" name="photos" accept=".jpg,.jpeg,.png,image/*" multiple>
+          </div>
+          <ul class="files" id="photos-list" aria-live="polite"></ul>
+        </section>
+      </div>
+
+      <section class="panel" style="margin-top:1rem" aria-labelledby="meta-title">
+        <h2 id="meta-title">Штамп чертежа (ГОСТ Р 21.101-2020)</h2>
+        <p class="hint">Метаданные попадут в основную надпись Формы 3.</p>
+        <div class="meta-form">
+          <label>Название объекта
+            <input name="object_name" type="text" placeholder="Усадьба …, корпус 1" required>
+          </label>
+          <label>Шифр
+            <input name="code" type="text" placeholder="026-2026-АР" required>
+          </label>
+          <label>Название листа
+            <input name="sheet_name" type="text" placeholder="План 1-го этажа" value="План">
+          </label>
+          <label>Стадия
+            <select name="stage">
+              <option value="Р">Р (рабочая)</option>
+              <option value="П">П (проект)</option>
+            </select>
+          </label>
+          <label>Разработал
+            <input name="drawn_by" type="text" placeholder="Иванов И.И.">
+          </label>
+          <label>Проверил
+            <input name="checked_by" type="text" placeholder="Петров П.П.">
+          </label>
+          <label>Организация
+            <input name="company" type="text" placeholder="Мосреставрация" value="Мосреставрация">
+          </label>
+          <label id="scale-hint" hidden>Контрольный отрезок (мм)
+            <input name="scale_mm" type="number" min="1" step="1" placeholder="например 6000">
+          </label>
+        </div>
+
+        <div class="actions">
+          <button type="submit" class="btn btn-primary" id="start-btn" disabled>Обработать</button>
+          <a class="btn" id="download-btn" aria-disabled="true">Скачать пакет DXF</a>
+        </div>
+
+        <div class="progress-wrap" id="progress-wrap" aria-live="polite">
+          <div class="progress-label">
+            <span id="progress-step">Ожидание…</span>
+            <span id="progress-pct">0%</span>
+          </div>
+          <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <i id="progress-bar"></i>
+          </div>
+        </div>
+        <p class="status" id="status"></p>
+      </section>
+    </form>
+
+    <section class="viewer" id="viewer" aria-label="Просмотр чертежа">
+      Просмотрщик DXF (WebGL) появится после обработки.
+    </section>
+  </div>
+  <script src="/static/js/app.js" defer></script>
+</body>
+</html>

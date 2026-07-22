@@ -1,0 +1,15 @@
+# Ignore local tooling noise; keep context small for rebuilds
+.git
+.venv
+venv
+__pycache__
+*.pyc
+data/uploads/**
+data/results/**
+!data/uploads/.gitkeep
+!data/results/.gitkeep
+models
+.cache
+.env
+*.md
+!README.md
