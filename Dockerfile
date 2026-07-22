@@ -20,8 +20,13 @@ RUN curl -fsSL "https://ftp.gnu.org/gnu/libredwg/libredwg-${LIBREDWG_VERSION}.ta
     && tar -xzf libredwg.tar.gz \
     && cd "libredwg-${LIBREDWG_VERSION}" \
     && ./configure --prefix=/opt/libredwg --disable-python --disable-shared \
-    && make -j"$(nproc)" \
-    && make install
+    && make -j"$(nproc)" -C src \
+    && make -j"$(nproc)" -C programs dxf2dwg \
+    && make -C src install \
+    && make -C programs install-exec \
+    && strip /opt/libredwg/bin/dxf2dwg || true \
+    && rm -rf /tmp/libredwg* \
+    && /opt/libredwg/bin/dxf2dwg --version
 
 FROM public.ecr.aws/docker/library/python:3.12-slim-bookworm
 
