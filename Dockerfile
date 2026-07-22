@@ -58,8 +58,11 @@ COPY scripts ./scripts
 
 RUN mkdir -p /app/data/uploads /app/data/results \
     && useradd --create-home --uid 10001 appuser \
-    && chown -R appuser:appuser /app
+    && chown -R appuser:appuser /app \
+    && chmod -R a+rwX /app/data
 
+# Bind mounts often use host UID; default image user is non-root.
+# Compose overrides with HOST_UID/HOST_GID when needed.
 USER appuser
 
 EXPOSE 8000

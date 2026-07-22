@@ -7,6 +7,8 @@ services:
     container_name: image_to_drawing_web
     ports:
       - "${PORT:-8000}:8000"
+    # Match host UID so bind-mounted data/ is writable without root in container
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     environment:
       - APP_ENV=${APP_ENV:-development}
       - UPLOAD_DIR=/app/data/uploads
