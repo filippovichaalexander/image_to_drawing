@@ -1,0 +1,5 @@
+# Optional heavy AI stack for AI_MODE=full (not installed in default image)
+ultralytics>=8.3.0
+paddlepaddle>=2.6.0
+paddleocr>=2.8.0
+torch>=2.2.0
