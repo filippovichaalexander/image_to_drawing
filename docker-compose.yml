@@ -1,0 +1,32 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: image_to_drawing:latest
+    container_name: image_to_drawing_web
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      - APP_ENV=${APP_ENV:-development}
+      - UPLOAD_DIR=/app/data/uploads
+      - RESULTS_DIR=/app/data/results
+      - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-50}
+      # AI backends: local stubs by default (lightweight). Set to "full" later for YOLO/OCR.
+      - AI_MODE=${AI_MODE:-stub}
+    volumes:
+      - ./app:/app/app:ro
+      - ./data/uploads:/app/data/uploads
+      - ./data/results:/app/data/results
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+# Optional GPU worker profile (future): docker compose --profile gpu up
+# workers:
+#   profiles: ["gpu"]
+#   ...
