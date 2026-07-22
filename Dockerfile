@@ -1,4 +1,5 @@
-FROM python:3.12-slim-bookworm
+# ECR public mirror of library/python — often more reachable than docker.io
+FROM public.ecr.aws/docker/library/python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
