@@ -14,7 +14,8 @@ services:
       - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-50}
       # AI backends: local stubs by default (lightweight). Set to "full" later for YOLO/OCR.
       - AI_MODE=${AI_MODE:-stub}
-    volumes:
+      - DWG_CONVERTER=${DWG_CONVERTER:-auto}
+      - ODA_FC_PATH=${ODA_FC_PATH:-}    volumes:
       - ./app:/app/app:ro
       - ./data/uploads:/app/data/uploads
       - ./data/results:/app/data/results

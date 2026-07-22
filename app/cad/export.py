@@ -13,7 +13,8 @@ from app.cad.stamp import add_gost_stamp_and_frame, ensure_gost_style, ensure_la
 
 
 def build_dxf(geometry: dict[str, Any], metadata: dict[str, Any], out_path: Path) -> Path:
-    doc = ezdxf.new("R2010")
+    # R2000: best LibreDWG encode compatibility for DXF→DWG
+    doc = ezdxf.new("R2000")
     ensure_layers(doc)
     ensure_gost_style(doc)
     msp = doc.modelspace()

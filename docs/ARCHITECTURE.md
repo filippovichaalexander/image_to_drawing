@@ -37,3 +37,11 @@
 - Кэш моделей в volume; warm worker
 - Параллельная обработка листов (asyncio + process pool)
 - CDN для dxf-viewer; критический CSS inline
+
+## Реализовано (v0.2)
+
+- WebGL-просмотр с переключением слоёв
+- OpenCV perspective для фото
+- DXF→DWG через LibreDWG (`dxf2dwg`) + fallback ODA
+- ZIP-пакет DWG/DXF
+- `AI_MODE=full` интерфейс (YOLO+OCR) с fallback на stub

@@ -3,16 +3,18 @@
 Веб-приложение для автоматической векторизации архитектурных сканов и фото
 в DXF/DWG по правилам СПДС / ЕСКД (ГОСТ).
 
-## Стек (MVP)
+## Стек
 
 | Слой | Технология |
 |------|------------|
-| UI + API | FastAPI + Jinja2 (лёгкий HTML/CSS/JS, без React/Node) |
-| Просмотр | CDN dxf-viewer / WebGL (этап UI) |
-| Очистка сканов | OpenCV (лёгкий путь); ControlNet — опционально позже |
-| Геометрия / OCR | stubs → YOLOv8-seg + PaddleOCR (профиль `full`) |
-| CAD | ezdxf (слои, размеры, рамка и штамп ГОСТ) |
-| Runtime | Docker + docker compose |
+| UI + API | FastAPI + Jinja2 (без React/Node) |
+| Просмотр | WebGL (слои, зум, панорама) |
+| Очистка сканов | OpenCV; ControlNet — позже |
+| Геометрия / OCR | `AI_MODE=stub` (контуры) или `full` (YOLOv8-seg + PaddleOCR) |
+| Фото | OpenCV Perspective Transform |
+| CAD | ezdxf (слои, размеры, рамка/штамп ГОСТ) |
+| DWG | LibreDWG `dxf2dwg` (в образе) или ODA File Converter (`ODA_FC_PATH`) |
+| Runtime | Docker Compose |
 
 ## Быстрый старт
 
@@ -20,23 +22,19 @@
 docker compose up --build
 ```
 
-Откройте http://localhost:8000
-
-Healthcheck: http://localhost:8000/health
+Откройте http://localhost:8000 · Health: `/health` · Capabilities: `/api/capabilities`
 
 ## Переменные окружения
 
-См. `.env.example`. По умолчанию `AI_MODE=stub` — без тяжёлых моделей
-(быстрый старт, малый образ).
+См. `.env.example`.
 
-## Документация ТЗ
+- `AI_MODE=stub|full` — full требует `requirements-full.txt` и веса в `models/`
+- `DWG_CONVERTER=auto|libredwg|oda`
+- `ODA_FC_PATH` — путь к ODA File Converter (опционально)
 
-Исходное ТЗ: [`main-instruction.md`](./main-instruction.md)
+Скачивание: ZIP с DXF + DWG (если конвертер отработал) + README.
 
-## Этапы MVP
+## Документация
 
-1. Docker + каркас приложения
-2. UI загрузки (чертежи / фото) + прогресс
-3. OpenCV denoising
-4. ezdxf: слои + рамка/штамп ГОСТ
-5. Оркестрация пайплайна + экспорт DXF
+- ТЗ: [`main-instruction.md`](./main-instruction.md)
+- Архитектура / коллизии: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)
