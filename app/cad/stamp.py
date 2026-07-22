@@ -8,7 +8,7 @@ import ezdxf
 from ezdxf import colors
 from ezdxf.enums import TextEntityAlignment
 
-from app.cad.gost import LAYER_NAMES, LINEWEIGHT, SHEET_SIZES
+from app.cad.gost import LAYER_NAMES, LINEWEIGHT
 
 
 def ensure_layers(doc: ezdxf.document.Drawing) -> None:
@@ -44,28 +44,23 @@ def ensure_gost_style(doc: ezdxf.document.Drawing) -> None:
             doc.styles.add("GOST_ST", font="txt")
 
 
+_LANDSCAPE = {
+    "A4": (297.0, 210.0),
+    "A3": (420.0, 297.0),
+    "A2": (594.0, 420.0),
+    "A1": (841.0, 594.0),
+}
+
+
 def pick_sheet_format(bounds_w: float, bounds_h: float) -> tuple[str, str, float, float]:
-    """Choose sheet so content (+ margins + stamp) fits; return name, orient, w, h."""
-    need_w = bounds_w + 40 + 30  # left binding + margins
-    need_h = bounds_h + 55 + 20  # stamp + margins
+    """Choose landscape sheet so content (+ margins + stamp) fits."""
+    need_w = bounds_w + 70
+    need_h = bounds_h + 90
     for name in ("A4", "A3", "A2", "A1"):
-        w, h = SHEET_SIZES[name]
-        # try landscape
-        if name == "A4":
-            lw, lh = h, w
-        else:
-            lw, lh = w, h if name != "A3" else (420, 297)
-        if name == "A3":
-            lw, lh = 420, 297
-        elif name == "A2":
-            lw, lh = 594, 420
-        elif name == "A1":
-            lw, lh = 841, 594
-        elif name == "A4":
-            lw, lh = 297, 210
+        lw, lh = _LANDSCAPE[name]
         if need_w <= lw - 25 and need_h <= lh - 10:
             return name, "landscape", lw, lh
-    return "A1", "landscape", 841, 594
+    return "A1", "landscape", *_LANDSCAPE["A1"]
 
 
 def add_gost_stamp_and_frame(
@@ -80,18 +75,8 @@ def add_gost_stamp_and_frame(
     Returns sheet (width, height).
     """
     metadata = metadata or {}
-    if format_name == "A3" or orientation == "landscape":
-        w, h = SHEET_SIZES.get(format_name, (420, 297))
-        if format_name == "A4":
-            w, h = 297, 210
-        elif format_name == "A2":
-            w, h = 594, 420
-        elif format_name == "A1":
-            w, h = 841, 594
-        elif format_name == "A3":
-            w, h = 420, 297
-    else:
-        w, h = SHEET_SIZES.get(format_name, (420, 297))
+    _ = orientation  # portrait reserved for later
+    w, h = _LANDSCAPE.get(format_name, _LANDSCAPE["A3"])
 
     ensure_layers(doc)
     ensure_gost_style(doc)

@@ -12,12 +12,12 @@ LINEWEIGHT = {
 DIM_OFFSET_MM = 10.0
 DIM_TICK_MM = 3.0  # 2–4 mm ticks at 45°
 
-# ГОСТ Р 21.101-2020 — sheet sizes (mm)
+# ГОСТ Р 21.101-2020 — portrait reference sizes (mm); landscape via stamp._LANDSCAPE
 SHEET_SIZES = {
     "A4": (210, 297),
-    "A3": (420, 297),  # landscape stored as (w, h)
-    "A2": (594, 420),
-    "A1": (841, 594),
+    "A3": (297, 420),
+    "A2": (420, 594),
+    "A1": (594, 841),
 }
 
 LAYER_NAMES = {

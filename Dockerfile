@@ -9,9 +9,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR $APP_HOME
 
-# System libs for OpenCV (headless) and fonts for GOST text rendering later
+# Minimal libs for opencv-python-headless (no Mesa/GL — keeps image lean)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libgl1 \
         libglib2.0-0 \
         libgomp1 \
         curl \

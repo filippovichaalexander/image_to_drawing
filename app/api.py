@@ -59,7 +59,7 @@ async def _save_uploads(
 async def create_job(
     background_tasks: BackgroundTasks,
     drawings: Annotated[list[UploadFile], File()],
-    photos: Annotated[list[UploadFile], File()] = [],
+    photos: Annotated[list[UploadFile] | None, File()] = None,
     object_name: Annotated[str, Form()] = "",
     code: Annotated[str, Form()] = "",
     sheet_name: Annotated[str, Form()] = "План",
