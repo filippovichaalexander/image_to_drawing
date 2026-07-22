@@ -1,14 +1,16 @@
-"""HTTP API: create/list job status and download results."""
+"""HTTP API: jobs, scene for WebGL, DXF/DWG/ZIP download."""
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
+from app.cad.dwg_convert import detect_engines
 from app.config import get_settings
 from app.jobs import JobStatus, jobs
 from app.pipeline.runner import run_pipeline
@@ -53,6 +55,15 @@ async def _save_uploads(
                 out.write(chunk)
         saved.append(target)
     return saved
+
+
+@router.get("/capabilities")
+async def capabilities() -> dict[str, Any]:
+    settings = get_settings()
+    return {
+        "ai_mode": settings.ai_mode,
+        "dwg": detect_engines(),
+    }
 
 
 @router.post("/jobs")
@@ -103,7 +114,8 @@ async def create_job(
         step="Файлы загружены",
     )
     background_tasks.add_task(run_pipeline, job.id)
-    return {"job_id": job.id, "needs_scale": False, **jobs.get(job.id).to_public()}  # type: ignore[union-attr]
+    public = jobs.get(job.id).to_public()  # type: ignore[union-attr]
+    return {"job_id": job.id, "needs_scale": False, **public}
 
 
 @router.get("/jobs/{job_id}")
@@ -114,6 +126,15 @@ async def get_job(job_id: str) -> dict:
     return job.to_public()
 
 
+@router.get("/jobs/{job_id}/scene")
+async def get_scene(job_id: str) -> JSONResponse:
+    job = jobs.get(job_id)
+    if not job or not job.scene_path or not job.scene_path.exists():
+        raise HTTPException(404, detail="Сцена ещё не готова")
+    data = json.loads(job.scene_path.read_text(encoding="utf-8"))
+    return JSONResponse(data)
+
+
 @router.get("/jobs/{job_id}/download")
 async def download_job(job_id: str) -> FileResponse:
     job = jobs.get(job_id)
@@ -122,5 +143,29 @@ async def download_job(job_id: str) -> FileResponse:
     return FileResponse(
         path=job.result_path,
         filename=job.result_path.name,
+        media_type="application/zip",
+    )
+
+
+@router.get("/jobs/{job_id}/dxf")
+async def download_dxf(job_id: str) -> FileResponse:
+    job = jobs.get(job_id)
+    if not job or not job.dxf_path or not job.dxf_path.exists():
+        raise HTTPException(404, detail="DXF ещё не готов")
+    return FileResponse(
+        path=job.dxf_path,
+        filename=job.dxf_path.name,
         media_type="application/dxf",
+    )
+
+
+@router.get("/jobs/{job_id}/dwg")
+async def download_dwg(job_id: str) -> FileResponse:
+    job = jobs.get(job_id)
+    if not job or not job.dwg_path or not job.dwg_path.exists():
+        raise HTTPException(404, detail=job.dwg_message if job else "DWG недоступен")
+    return FileResponse(
+        path=job.dwg_path,
+        filename=job.dwg_path.name,
+        media_type="application/acad",
     )

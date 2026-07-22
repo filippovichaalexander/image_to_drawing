@@ -81,7 +81,7 @@
 
         <div class="actions">
           <button type="submit" class="btn btn-primary" id="start-btn" disabled>Обработать</button>
-          <a class="btn" id="download-btn" aria-disabled="true">Скачать пакет DXF</a>
+          <a class="btn" id="download-btn" aria-disabled="true">Скачать пакет DWG/DXF</a>
         </div>
 
         <div class="progress-wrap" id="progress-wrap" aria-live="polite">
@@ -97,10 +97,16 @@
       </section>
     </form>
 
-    <section class="viewer" id="viewer" aria-label="Просмотр чертежа">
-      Просмотрщик DXF (WebGL) появится после обработки.
+    <section class="viewer-panel" aria-label="Просмотр чертежа">
+      <div class="viewer-toolbar">
+        <strong>Просмотр (WebGL)</strong>
+        <span class="hint" id="viewer-hint">Колесо — зум, перетаскивание — панорама</span>
+        <div class="layer-toggles" id="layer-toggles"></div>
+      </div>
+      <div class="viewer" id="viewer">Загрузите чертежи и нажмите «Обработать».</div>
     </section>
   </div>
+  <script src="/static/js/viewer.js" defer></script>
   <script src="/static/js/app.js" defer></script>
 </body>
 </html>

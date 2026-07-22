@@ -30,6 +30,11 @@ class Job:
     drawing_paths: list[Path] = field(default_factory=list)
     photo_paths: list[Path] = field(default_factory=list)
     result_path: Path | None = None
+    dxf_path: Path | None = None
+    dwg_path: Path | None = None
+    scene_path: Path | None = None
+    dwg_engine: str | None = None
+    dwg_message: str | None = None
     created_at: float = field(default_factory=time.time)
 
     def to_public(self) -> dict[str, Any]:
@@ -41,6 +46,10 @@ class Job:
             "error": self.error,
             "needs_scale": self.needs_scale,
             "has_result": self.result_path is not None and self.result_path.exists(),
+            "has_dxf": self.dxf_path is not None and self.dxf_path.exists(),
+            "has_dwg": self.dwg_path is not None and self.dwg_path.exists(),
+            "dwg_engine": self.dwg_engine,
+            "dwg_message": self.dwg_message,
         }
 
 

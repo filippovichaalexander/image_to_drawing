@@ -1,6 +1,5 @@
 (() => {
   const $ = (sel, root = document) => root.querySelector(sel);
-  const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
   const themeBtn = $("#theme-toggle");
   const form = $("#job-form");
@@ -15,7 +14,8 @@
   const progressStep = $("#progress-step");
   const statusEl = $("#status");
   const downloadBtn = $("#download-btn");
-  const viewer = $("#viewer");
+  const viewerEl = $("#viewer");
+  const layerToggles = $("#layer-toggles");
   const scaleHint = $("#scale-hint");
 
   const state = {
@@ -23,12 +23,14 @@
     photos: [],
     jobId: null,
     pollTimer: null,
+    viewer: null,
   };
 
   function applyTheme(theme) {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem("itd-theme", theme);
     if (themeBtn) themeBtn.textContent = theme === "dark" ? "Светлая" : "Тёмная";
+    state.viewer?.draw?.();
   }
 
   const saved = localStorage.getItem("itd-theme");
@@ -65,7 +67,6 @@
         open();
       }
     });
-
     ["dragenter", "dragover"].forEach((ev) => {
       zone.addEventListener(ev, (e) => {
         e.preventDefault();
@@ -112,6 +113,30 @@
     progressStep.textContent = step || "";
   }
 
+  function renderLayers(layerState) {
+    layerToggles.innerHTML = "";
+    Object.keys(layerState).sort().forEach((name) => {
+      const id = `layer-${name}`;
+      const label = document.createElement("label");
+      label.innerHTML = `<input type="checkbox" id="${id}" ${layerState[name] ? "checked" : ""}> ${name}`;
+      label.querySelector("input").addEventListener("change", (e) => {
+        state.viewer?.setLayer(name, e.target.checked);
+      });
+      layerToggles.appendChild(label);
+    });
+  }
+
+  async function loadViewer(jobId) {
+    const res = await fetch(`/api/jobs/${jobId}/scene`);
+    if (!res.ok) throw new Error("Не удалось загрузить сцену");
+    const scene = await res.json();
+    if (!state.viewer) {
+      state.viewer = new window.DxfWebGLViewer(viewerEl);
+    }
+    const layers = state.viewer.setScene(scene);
+    renderLayers(layers);
+  }
+
   async function pollJob(jobId) {
     clearInterval(state.pollTimer);
     state.pollTimer = setInterval(async () => {
@@ -122,11 +147,19 @@
         setProgress(data.progress || 0, data.step || "");
         if (data.status === "done") {
           clearInterval(state.pollTimer);
-          setStatus("Готово. Можно скачать DXF-пакет.", "ok");
+          const dwgNote = data.has_dwg
+            ? `DWG готов (${data.dwg_engine}).`
+            : `DXF в пакете; DWG: ${data.dwg_message || "конвертер недоступен"}.`;
+          setStatus(`Готово. ${dwgNote}`, "ok");
           downloadBtn.disabled = false;
+          downloadBtn.removeAttribute("aria-disabled");
           downloadBtn.href = `/api/jobs/${jobId}/download`;
-          viewer.innerHTML = `<p>Чертёж обработан. WebGL-просмотрщик подключится на следующем этапе.</p>
-            <p><a href="/api/jobs/${jobId}/download">Скачать пакет DXF</a></p>`;
+          downloadBtn.textContent = "Скачать пакет DWG/DXF";
+          try {
+            await loadViewer(jobId);
+          } catch (err) {
+            viewerEl.textContent = err.message || "Ошибка просмотрщика";
+          }
           startBtn.disabled = false;
         } else if (data.status === "error") {
           clearInterval(state.pollTimer);
@@ -138,7 +171,7 @@
         setStatus(err.message || "Ошибка сети", "error");
         startBtn.disabled = false;
       }
-    }, 600);
+    }, 500);
   }
 
   form?.addEventListener("submit", async (e) => {
@@ -146,13 +179,15 @@
     if (!state.drawings.length) return;
 
     const fd = new FormData(form);
-    // ensure file inputs are included
     state.drawings.forEach((f) => fd.append("drawings", f));
     state.photos.forEach((f) => fd.append("photos", f));
 
     startBtn.disabled = true;
     downloadBtn.disabled = true;
+    downloadBtn.setAttribute("aria-disabled", "true");
     downloadBtn.removeAttribute("href");
+    layerToggles.innerHTML = "";
+    viewerEl.textContent = "Обработка…";
     setProgress(2, "Загрузка файлов…");
     setStatus("Задача принята, обрабатываем…");
 

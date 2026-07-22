@@ -9,6 +9,7 @@ from fastapi.templating import Jinja2Templates
 
 from app import __version__
 from app.api import router as api_router
+from app.cad.dwg_convert import detect_engines
 from app.config import get_settings
 
 settings = get_settings()
@@ -33,6 +34,7 @@ async def health() -> dict:
         "version": __version__,
         "ai_mode": settings.ai_mode,
         "env": settings.app_env,
+        "dwg": detect_engines(),
     }
 
 
