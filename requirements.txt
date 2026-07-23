@@ -11,6 +11,8 @@ pydantic-settings==2.9.1
 opencv-python-headless==4.11.0.86
 numpy==2.2.5
 Pillow==11.2.1
+# PDF → PNG without poppler (slim Docker)
+pypdfium2==4.30.1
 
 # CAD generation (DXF; DWG via optional ODA converter later)
 ezdxf==1.4.2

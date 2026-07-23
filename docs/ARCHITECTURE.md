@@ -38,10 +38,19 @@
 - Параллельная обработка листов (asyncio + process pool)
 - CDN для dxf-viewer; критический CSS inline
 
-## Реализовано (v0.2)
+## Реализовано (v0.2+)
 
 - WebGL-просмотр с переключением слоёв
 - OpenCV perspective для фото
 - DXF→DWG через LibreDWG (`dxf2dwg`) + fallback ODA
 - ZIP-пакет DWG/DXF
 - `AI_MODE=full` интерфейс (YOLO+OCR) с fallback на stub
+- PDF → PNG через pypdfium2 (до 3 стр./файл, 150 DPI)
+
+## Паттерны лёгкости / скорости
+
+1. **Stub-first:** `AI_MODE=stub` по умолчанию; тяжёлые веса только в `models/` + `requirements-full.txt`.
+2. **Downscale-then-scale:** CV на ≤1600 px по длинной стороне, координаты в мм через scale factor.
+3. **PDF cap:** первые N страниц @ 150 DPI — хватает для линий, без печати.
+4. **Lazy imports:** YOLO/OCR/pypdfium тянутся только в нужной стадии.
+5. **R2000 DXF:** совместимость с LibreDWG без тяжёлого ODA в образе.

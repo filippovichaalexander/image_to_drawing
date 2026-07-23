@@ -21,15 +21,20 @@ def run_pipeline(job_id: str) -> None:
     out_root.mkdir(parents=True, exist_ok=True)
 
     try:
-        jobs.update(job_id, status=JobStatus.running, progress=8, step="Очистка сканов…")
+        jobs.update(job_id, status=JobStatus.running, progress=5, step="Подготовка листов…")
+        from app.pipeline.pdf_raster import expand_drawing_inputs
+
+        sheet_paths = expand_drawing_inputs(job.drawing_paths, out_root)
+        if not sheet_paths:
+            raise ValueError("Нет растровых листов для обработки (проверьте PDF/изображения)")
+
+        jobs.update(job_id, progress=12, step="Очистка сканов…")
         from app.pipeline.denoise import denoise_image
 
         cleaned_dir = out_root / "cleaned"
         cleaned_dir.mkdir(parents=True, exist_ok=True)
         cleaned: list[Path] = []
-        for path in job.drawing_paths:
-            if path.suffix.lower() == ".pdf":
-                continue
+        for path in sheet_paths:
             out = cleaned_dir / f"{path.stem}_clean.png"
             denoise_image(path, out)
             cleaned.append(out)
