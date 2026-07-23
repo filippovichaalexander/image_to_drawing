@@ -98,7 +98,7 @@ def run_pipeline(job_id: str) -> None:
         jobs.update(job_id, progress=62, step="Кросс-валидация размеров…")
         from app.pipeline.validate import correlate_dimensions
 
-        geometry = correlate_dimensions(geometry)
+        geometry = correlate_dimensions(geometry, metadata=job.metadata)
         (out_root / "geometry.json").write_text(
             json.dumps(geometry, ensure_ascii=False, indent=2),
             encoding="utf-8",
