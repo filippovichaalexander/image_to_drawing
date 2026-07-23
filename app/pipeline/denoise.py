@@ -7,6 +7,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+# Cap huge scans so NLMeans stays interactive on CPU.
+MAX_DENOISE_SIDE = 2400
+
 
 def denoise_image(src: Path, dst: Path) -> Path:
     """
@@ -19,6 +22,12 @@ def denoise_image(src: Path, dst: Path) -> Path:
     img = cv2.imdecode(data, cv2.IMREAD_COLOR)
     if img is None:
         raise ValueError(f"Не удалось прочитать изображение: {src.name}")
+
+    h, w = img.shape[:2]
+    long_side = max(h, w)
+    if long_side > MAX_DENOISE_SIDE:
+        scale = MAX_DENOISE_SIDE / long_side
+        img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     # Mild denoise without erasing thin ink lines

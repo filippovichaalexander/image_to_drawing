@@ -1,4 +1,4 @@
-"""Stage 3: photo enrichment — OpenCV perspective / orthophoto heuristics."""
+"""Stage 3: photo enrichment — OpenCV perspective + light opening cues."""
 
 from __future__ import annotations
 
@@ -8,10 +8,22 @@ from typing import Any
 import cv2
 import numpy as np
 
+MAX_PHOTO_SIDE = 1280
+
 
 def _read_bgr(path: Path) -> np.ndarray | None:
     data = np.fromfile(str(path), dtype=np.uint8)
     return cv2.imdecode(data, cv2.IMREAD_COLOR)
+
+
+def _downscale_bgr(img: np.ndarray) -> tuple[np.ndarray, float]:
+    h, w = img.shape[:2]
+    long_side = max(h, w)
+    if long_side <= MAX_PHOTO_SIDE:
+        return img, 1.0
+    factor = MAX_PHOTO_SIDE / long_side
+    small = cv2.resize(img, (int(w * factor), int(h * factor)), interpolation=cv2.INTER_AREA)
+    return small, 1.0 / factor
 
 
 def _order_corners(pts: np.ndarray) -> np.ndarray:
@@ -31,8 +43,9 @@ def perspective_rectify(src: Path, dst: Path) -> dict[str, Any]:
     if img is None:
         raise ValueError(f"Cannot read photo: {src.name}")
 
-    h, w = img.shape[:2]
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    work, _ = _downscale_bgr(img)
+    h, w = work.shape[:2]
+    gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
     edges = cv2.Canny(blur, 50, 150)
     edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
@@ -61,11 +74,11 @@ def perspective_rectify(src: Path, dst: Path) -> dict[str, Any]:
             dtype=np.float32,
         )
         matrix = cv2.getPerspectiveTransform(corners, dst_pts)
-        out = cv2.warpPerspective(img, matrix, (max_w, max_h))
+        out = cv2.warpPerspective(work, matrix, (max_w, max_h))
         meta["warped"] = True
         meta["size"] = [max_w, max_h]
     else:
-        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        lab = cv2.cvtColor(work, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         out = cv2.cvtColor(cv2.merge([clahe.apply(l), a, b]), cv2.COLOR_LAB2BGR)
@@ -80,6 +93,48 @@ def perspective_rectify(src: Path, dst: Path) -> dict[str, Any]:
     return meta
 
 
+def _detect_facade_openings(rectified_path: Path, max_count: int = 16) -> list[dict[str, Any]]:
+    """
+    Cheap window-grid cues on a rectified facade (ТЗ option B lite).
+    Dark rectangular regions → candidate openings; mapped later in mm space.
+    """
+    img = _read_bgr(rectified_path)
+    if img is None:
+        return []
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape[:2]
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    # Windows are often darker than wall
+    thr = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 35, 8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    thr = cv2.morphologyEx(thr, cv2.MORPH_OPEN, kernel, iterations=1)
+    contours, _ = cv2.findContours(thr, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Plan footprint span used as horizontal reference for placement
+    cands: list[dict[str, Any]] = []
+    for cnt in contours:
+        x, y, bw, bh = cv2.boundingRect(cnt)
+        area = bw * bh
+        if area < 0.002 * w * h or area > 0.12 * w * h:
+            continue
+        aspect = bw / max(bh, 1)
+        if aspect < 0.35 or aspect > 3.5:
+            continue
+        cands.append(
+            {
+                "type": "window",
+                "nx": (x + bw / 2) / w,  # 0..1 along facade
+                "ny": 1.0 - (y + bh / 2) / h,
+                "nw": bw / w,
+                "nh": bh / h,
+                "from": "photo_rect",
+            }
+        )
+        if len(cands) >= max_count:
+            break
+    return cands
+
+
 def enrich_from_photos(
     geometry: dict[str, Any],
     photo_paths: list[Path],
@@ -91,19 +146,49 @@ def enrich_from_photos(
     rect_dir.mkdir(parents=True, exist_ok=True)
 
     reports = []
+    facade_cues: list[dict[str, Any]] = []
     for idx, path in enumerate(photo_paths):
         try:
-            reports.append(perspective_rectify(path, rect_dir / f"photo_{idx:02d}_rect.png"))
+            out = rect_dir / f"photo_{idx:02d}_rect.png"
+            report = perspective_rectify(path, out)
+            reports.append(report)
+            if report.get("warped") or report.get("output"):
+                facade_cues.extend(_detect_facade_openings(out))
         except Exception as exc:  # noqa: BLE001
             reports.append({"source": path.name, "error": str(exc)})
 
     openings = list(geometry.get("openings") or [])
-    if any(r.get("warped") for r in reports):
+    walls = geometry.get("walls") or []
+    xs = [p[0] for wall in walls for p in wall] or [0.0, 12000.0]
+    ys = [p[1] for wall in walls for p in wall] or [0.0, 8000.0]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    span_x = max(max_x - min_x, 1.0)
+    # Place facade openings along the southern (min_y) wall as plan symbols
+    wall_y = min_y
+    depth = max(span_x * 0.02, 200.0)
+
+    added = 0
+    for cue in facade_cues[:12]:
+        cx = min_x + float(cue["nx"]) * span_x
+        half_w = max(float(cue["nw"]) * span_x * 0.5, 400.0)
+        openings.append(
+            {
+                "type": cue.get("type", "window"),
+                "p1": [cx - half_w, wall_y - depth],
+                "p2": [cx + half_w, wall_y + depth],
+                "from": "photogrammetry",
+                "facade_ny": cue.get("ny"),
+            }
+        )
+        added += 1
+
+    if added == 0 and any(r.get("warped") for r in reports):
         openings.append(
             {
                 "type": "facade_enrichment",
                 "from": "photogrammetry",
-                "note": "Perspective-rectified photos available for detail pass",
+                "note": "Perspective-rectified photos available; no window cues found",
             }
         )
 
@@ -112,6 +197,7 @@ def enrich_from_photos(
         "count": len(photo_paths),
         "mode": ai_mode,
         "reports": reports,
-        "note": "OpenCV Perspective Transform; Meshroom — post-MVP",
+        "openings_added": added,
+        "note": "OpenCV Perspective Transform + adaptive window cues; Meshroom — post-MVP",
     }
     return geometry
