@@ -43,8 +43,12 @@ def run_pipeline(job_id: str) -> None:
         from app.pipeline.geometry import extract_geometry
 
         geometry = extract_geometry(cleaned, ai_mode=settings.ai_mode)
+        jobs.update(
+            job_id,
+            needs_scale=bool(geometry.get("needs_scale")) and not job.metadata.get("scale_mm"),
+        )
 
-        # Optional user scale reference
+        # Optional user scale reference (ТЗ: контрольный отрезок)
         scale_mm = job.metadata.get("scale_mm")
         if scale_mm:
             try:
@@ -52,13 +56,31 @@ def run_pipeline(job_id: str) -> None:
                 dims = geometry.get("dimensions") or []
                 if dims and dims[0].get("value_mm"):
                     factor = target / float(dims[0]["value_mm"])
-                    for wall in geometry.get("walls") or []:
-                        for p in wall:
-                            p[0] *= factor
-                            p[1] *= factor
+                    for key in ("walls", "partitions"):
+                        for poly in geometry.get(key) or []:
+                            for p in poly:
+                                p[0] *= factor
+                                p[1] *= factor
+                    for op in geometry.get("openings") or []:
+                        for k in ("p1", "p2"):
+                            if k in op:
+                                op[k][0] *= factor
+                                op[k][1] *= factor
+                    for axis in geometry.get("axes") or []:
+                        for k, v in list(axis.items()):
+                            if k in {"name", "sheet", "ocr"}:
+                                continue
+                            if isinstance(v, (int, float)):
+                                axis[k] = float(v) * factor
                     for d in dims:
                         d["value_mm"] = round(float(d["value_mm"]) * factor)
+                        if "p1" in d and "p2" in d:
+                            d["p1"] = [d["p1"][0] * factor, d["p1"][1] * factor]
+                            d["p2"] = [d["p2"][0] * factor, d["p2"][1] * factor]
                     geometry["scale_factor"] = factor
+                    geometry["needs_scale"] = False
+                    geometry["scale_confidence"] = max(float(geometry.get("scale_confidence") or 0), 0.9)
+                    jobs.update(job_id, needs_scale=False)
             except (TypeError, ValueError):
                 pass
 

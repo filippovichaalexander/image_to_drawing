@@ -48,6 +48,27 @@ def build_dxf(geometry: dict[str, Any], metadata: dict[str, Any], out_path: Path
         if len(pts) >= 2:
             msp.add_lwpolyline(pts, dxfattribs={"layer": LAYER_NAMES["walls"]})
 
+    for part in geometry.get("partitions") or []:
+        pts = [map_pt(p[0], p[1]) for p in part]
+        if len(pts) >= 2:
+            msp.add_lwpolyline(pts, dxfattribs={"layer": LAYER_NAMES["partitions"]})
+
+    for opening in geometry.get("openings") or []:
+        if "p1" not in opening or "p2" not in opening:
+            continue
+        p1 = map_pt(opening["p1"][0], opening["p1"][1])
+        p2 = map_pt(opening["p2"][0], opening["p2"][1])
+        # Axis-aligned opening rectangle on Окна_Двери
+        x0, x1 = sorted((p1[0], p2[0]))
+        y0, y1 = sorted((p1[1], p2[1]))
+        msp.add_lwpolyline(
+            [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)],
+            dxfattribs={"layer": LAYER_NAMES["openings"]},
+        )
+        # Simple door swing hint for door type
+        if str(opening.get("type", "")).lower() == "door":
+            msp.add_line((x0, y0), (x1, y1), dxfattribs={"layer": LAYER_NAMES["openings"]})
+
     for axis in geometry.get("axes") or []:
         if "x" in axis:
             x = axis["x"]
