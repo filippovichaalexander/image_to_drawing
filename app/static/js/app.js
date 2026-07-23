@@ -150,7 +150,15 @@
           const dwgNote = data.has_dwg
             ? `DWG готов (${data.dwg_engine}).`
             : `DXF в пакете; DWG: ${data.dwg_message || "конвертер недоступен"}.`;
-          setStatus(`Готово. ${dwgNote}`, "ok");
+          let scaleNote = "";
+          if (data.needs_scale) {
+            scaleHint?.classList.add("is-warn");
+            scaleNote = " Масштаб приблизительный — укажите контрольный отрезок (мм) и запустите снова.";
+            setStatus(`Готово. ${dwgNote}${scaleNote}`, "error");
+          } else {
+            scaleHint?.classList.remove("is-warn");
+            setStatus(`Готово. ${dwgNote}`, "ok");
+          }
           downloadBtn.disabled = false;
           downloadBtn.removeAttribute("aria-disabled");
           downloadBtn.href = `/api/jobs/${jobId}/download`;
@@ -199,12 +207,7 @@
       }
       const data = await res.json();
       state.jobId = data.job_id;
-      if (data.needs_scale) {
-        scaleHint.hidden = false;
-        setStatus("ИИ не уверен в масштабе — укажите контрольный отрезок (мм).", "error");
-      } else {
-        scaleHint.hidden = true;
-      }
+      scaleHint?.classList.remove("is-warn");
       pollJob(data.job_id);
     } catch (err) {
       setStatus(err.message || "Ошибка загрузки", "error");

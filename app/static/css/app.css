@@ -140,6 +140,11 @@ a { color: var(--accent); }
   font-size: 1.05rem;
 }
 .hint { margin: 0 0 0.85rem; color: var(--muted); font-size: 0.9rem; }
+#scale-hint.is-warn input {
+  outline: 2px solid color-mix(in srgb, var(--danger) 70%, transparent);
+  border-color: var(--danger);
+}
+#scale-help { margin-top: -0.35rem; }
 
 .drop {
   border: 1.5px dashed color-mix(in srgb, var(--accent) 55%, var(--line));
