@@ -17,7 +17,7 @@ def ensure_layers(doc: ezdxf.document.Drawing) -> None:
         LAYER_NAMES["stamp_text"]: {"color": colors.WHITE, "lineweight": LINEWEIGHT["thin"]},
         LAYER_NAMES["walls"]: {"color": colors.RED, "lineweight": LINEWEIGHT["thick"]},
         LAYER_NAMES["partitions"]: {"color": colors.YELLOW, "lineweight": LINEWEIGHT["medium"]},
-        LAYER_NAMES["axes"]: {"color": colors.CYAN, "lineweight": LINEWEIGHT["axis"], "linetype": "CENTER"},
+        LAYER_NAMES["axes"]: {"color": colors.CYAN, "lineweight": LINEWEIGHT["thin"], "linetype": "CENTER"},
         LAYER_NAMES["dims"]: {"color": colors.GREEN, "lineweight": LINEWEIGHT["thin"]},
         LAYER_NAMES["openings"]: {"color": colors.BLUE, "lineweight": LINEWEIGHT["medium"]},
     }
@@ -51,15 +51,26 @@ _LANDSCAPE = {
     "A1": (841.0, 594.0),
 }
 
+_PORTRAIT = {
+    "A4": (210.0, 297.0),
+    "A3": (297.0, 420.0),
+    "A2": (420.0, 594.0),
+    "A1": (594.0, 841.0),
+}
+
 
 def pick_sheet_format(bounds_w: float, bounds_h: float) -> tuple[str, str, float, float]:
-    """Choose landscape sheet so content (+ margins + stamp) fits."""
+    """Choose sheet so content (+ margins + stamp) fits; prefer landscape."""
     need_w = bounds_w + 70
     need_h = bounds_h + 90
     for name in ("A4", "A3", "A2", "A1"):
         lw, lh = _LANDSCAPE[name]
         if need_w <= lw - 25 and need_h <= lh - 10:
             return name, "landscape", lw, lh
+    for name in ("A3", "A2", "A1"):
+        pw, ph = _PORTRAIT[name]
+        if need_w <= pw - 25 and need_h <= ph - 10:
+            return name, "portrait", pw, ph
     return "A1", "landscape", *_LANDSCAPE["A1"]
 
 
@@ -75,15 +86,15 @@ def add_gost_stamp_and_frame(
     Returns sheet (width, height).
     """
     metadata = metadata or {}
-    _ = orientation  # portrait reserved for later
-    w, h = _LANDSCAPE.get(format_name, _LANDSCAPE["A3"])
+    sizes = _PORTRAIT if orientation == "portrait" else _LANDSCAPE
+    w, h = sizes.get(format_name, sizes["A3"])
 
     ensure_layers(doc)
     ensure_gost_style(doc)
     frame = LAYER_NAMES["frame"]
     text_layer = LAYER_NAMES["stamp_text"]
 
-    # Outer sheet edge (optional thin)
+    # Outer sheet edge
     msp.add_lwpolyline(
         [(0, 0), (w, 0), (w, h), (0, h), (0, 0)],
         dxfattribs={"layer": frame, "lineweight": LINEWEIGHT["thin"]},
@@ -103,14 +114,28 @@ def add_gost_stamp_and_frame(
         [(sx, sy), (x_max, sy), (x_max, sy + 55), (sx, sy + 55), (sx, sy)],
         dxfattribs={"layer": frame},
     )
-    msp.add_line((sx, sy + 15), (x_max, sy + 15), dxfattribs={"layer": frame})
-    msp.add_line((sx + 50, sy), (sx + 50, sy + 55), dxfattribs={"layer": frame})
-    msp.add_line((x_max - 35, sy), (x_max - 35, sy + 15), dxfattribs={"layer": frame})
-    msp.add_line((x_max - 35, sy + 15), (x_max - 35, sy + 55), dxfattribs={"layer": frame})
-    msp.add_line((sx, sy + 40), (sx + 50, sy + 40), dxfattribs={"layer": frame})
-    msp.add_line((sx, sy + 30), (sx + 50, sy + 30), dxfattribs={"layer": frame})
 
-    def text(value: str, pos: tuple[float, float], height: float = 2.5, center: bool = False) -> None:
+    # Horizontal dividers (Form 3 simplified denser grid)
+    for dy in (5, 10):
+        msp.add_line((sx, sy + dy), (sx + 50, sy + dy), dxfattribs={"layer": frame})
+    for dy in (15, 25, 40, 45, 50):
+        msp.add_line((sx, sy + dy), (x_max, sy + dy), dxfattribs={"layer": frame})
+
+    # Vertical dividers
+    msp.add_line((sx + 50, sy), (sx + 50, sy + 55), dxfattribs={"layer": frame})
+    msp.add_line((sx + 70, sy + 15), (sx + 70, sy + 55), dxfattribs={"layer": frame})
+    msp.add_line((x_max - 35, sy), (x_max - 35, sy + 55), dxfattribs={"layer": frame})
+    msp.add_line((x_max - 20, sy), (x_max - 20, sy + 15), dxfattribs={"layer": frame})
+    msp.add_line((x_max - 10, sy), (x_max - 10, sy + 15), dxfattribs={"layer": frame})
+
+    def text(
+        value: str,
+        pos: tuple[float, float],
+        height: float = 2.5,
+        center: bool = False,
+    ) -> None:
+        if not value:
+            return
         entity = msp.add_text(
             value,
             height=height,
@@ -121,13 +146,33 @@ def add_gost_stamp_and_frame(
         else:
             entity.set_placement(pos, align=TextEntityAlignment.LEFT)
 
-    text(str(metadata.get("code", "")), (sx + 117.5, sy + 35), height=5.0, center=True)
-    text(str(metadata.get("object_name", ""))[:48], (sx + 55, sy + 8), height=2.5)
-    text(str(metadata.get("sheet_name", ""))[:40], (sx + 55, sy + 22), height=2.5)
-    text(str(metadata.get("stage", "Р")), (x_max - 17.5, sy + 7.5), height=3.5, center=True)
-    text(str(metadata.get("sheet_num", "1")), (x_max - 17.5, sy + 35), height=3.5, center=True)
-    text(f"Разраб. {metadata.get('drawn_by', '')}", (sx + 2, sy + 45), height=2.5)
-    text(f"Пров. {metadata.get('checked_by', '')}", (sx + 2, sy + 33), height=2.5)
-    text(str(metadata.get("company", ""))[:28], (sx + 2, sy + 2), height=2.0)
+    # Left signature column labels
+    text("Изм.", (sx + 2, sy + 51), height=1.8)
+    text("Кол.уч.", (sx + 12, sy + 51), height=1.8)
+    text("Лист", (sx + 28, sy + 51), height=1.8)
+    text("№ док.", (sx + 2, sy + 46), height=1.8)
+    text("Подп.", (sx + 28, sy + 46), height=1.8)
+    text("Дата", (sx + 40, sy + 46), height=1.8)
+
+    text("Разраб.", (sx + 2, sy + 41), height=2.0)
+    text(str(metadata.get("drawn_by", ""))[:18], (sx + 18, sy + 41), height=2.2)
+    text("Пров.", (sx + 2, sy + 31), height=2.0)
+    text(str(metadata.get("checked_by", ""))[:18], (sx + 18, sy + 31), height=2.2)
+    text("Н.контр.", (sx + 2, sy + 21), height=2.0)
+    text("ГИП", (sx + 2, sy + 11), height=2.0)
+
+    # Project code / object / sheet
+    text(str(metadata.get("code", "")), (sx + 117.5, sy + 47.5), height=5.0, center=True)
+    text(str(metadata.get("object_name", ""))[:52], (sx + 72, sy + 28), height=2.5)
+    text(str(metadata.get("sheet_name", ""))[:44], (sx + 72, sy + 18), height=2.5)
+    text(str(metadata.get("company", ""))[:36], (sx + 72, sy + 8), height=2.2)
+
+    # Stage / sheet / sheets count cells
+    text("Стадия", (x_max - 27.5, sy + 12), height=1.6, center=True)
+    text(str(metadata.get("stage", "Р")), (x_max - 27.5, sy + 5), height=3.5, center=True)
+    text("Лист", (x_max - 15, sy + 12), height=1.6, center=True)
+    text(str(metadata.get("sheet_num", "1")), (x_max - 15, sy + 5), height=3.0, center=True)
+    text("Листов", (x_max - 5, sy + 12), height=1.6, center=True)
+    text(str(metadata.get("sheets_total", "1")), (x_max - 5, sy + 5), height=3.0, center=True)
 
     return w, h

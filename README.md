@@ -10,9 +10,10 @@
 | UI + API | FastAPI + Jinja2 (без React/Node) |
 | Просмотр | WebGL (слои, зум, панорама) |
 | Очистка сканов | OpenCV; ControlNet — позже |
-| Геометрия / OCR | `AI_MODE=stub` (контуры) или `full` (YOLOv8-seg + PaddleOCR) |
-| Фото | OpenCV Perspective Transform |
-| CAD | ezdxf (слои, размеры, рамка/штамп ГОСТ) |
+| Геометрия / OCR | `AI_MODE=stub` (Hough/контуры ≤1600px) или `full` (YOLOv8-seg + PaddleOCR) |
+| Фото | OpenCV Perspective Transform + лёгкие окна |
+| CAD | ezdxf (слои, размеры, рамка/штамп ГОСТ Форма 3) |
+| PDF | pypdfium2 → PNG (≤3 стр., 150 DPI) |
 | DWG | LibreDWG `dxf2dwg` (в образе) или ODA File Converter (`ODA_FC_PATH`) |
 | Runtime | Docker Compose |
 

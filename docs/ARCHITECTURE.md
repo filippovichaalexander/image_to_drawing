@@ -38,19 +38,32 @@
 - Параллельная обработка листов (asyncio + process pool)
 - CDN для dxf-viewer; критический CSS inline
 
-## Реализовано (v0.2+)
+## Реализовано (v0.3)
 
 - WebGL-просмотр с переключением слоёв
-- OpenCV perspective для фото
+- OpenCV perspective для фото + эвристика окон на фасаде
 - DXF→DWG через LibreDWG (`dxf2dwg`) + fallback ODA
 - ZIP-пакет DWG/DXF
 - `AI_MODE=full` интерфейс (YOLO+OCR) с fallback на stub
 - PDF → PNG через pypdfium2 (до 3 стр./файл, 150 DPI)
+- Stub-геометрия: downscale → Hough → стены/перегородки/проёмы
+- Контрольный отрезок (мм) в UI; `needs_scale` по confidence
+- Кросс-валидация: голосование модулей + унификация осей + перенос высот
+- Штамп Формы 3 (плотная сетка) + portrait fallback
 
 ## Паттерны лёгкости / скорости
 
 1. **Stub-first:** `AI_MODE=stub` по умолчанию; тяжёлые веса только в `models/` + `requirements-full.txt`.
-2. **Downscale-then-scale:** CV на ≤1600 px по длинной стороне, координаты в мм через scale factor.
+2. **Downscale-then-scale:** CV на ≤1600 px (чертежи) / ≤1280 px (фото), координаты в мм через scale factor.
 3. **PDF cap:** первые N страниц @ 150 DPI — хватает для линий, без печати.
 4. **Lazy imports:** YOLO/OCR/pypdfium тянутся только в нужной стадии.
 5. **R2000 DXF:** совместимость с LibreDWG без тяжёлого ODA в образе.
+6. **Hough ≤200 сегментов** + дешёвый merge вместо тяжёлой сегментации в stub.
+7. **Один проход пайплайна** без Meshroom/ControlNet — GPU-профиль отдельно.
+
+## Следующие шаги (качество, не «вес»)
+
+- ONNX nano denoise / wall-seg вместо полного PyTorch в образе
+- ROI-OCR только вокруг размерных цепочек
+- Параллель листов через process pool при ≥2 CPU
+- Дообучение `walls_seg.pt` на обмерных листах
