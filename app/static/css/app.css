@@ -253,6 +253,7 @@ input:focus, select:focus {
   color: var(--muted);
 }
 .status.error { color: var(--danger); }
+.status.warn { color: #c9852a; }
 .status.ok { color: var(--accent-2); }
 
 .viewer-panel {

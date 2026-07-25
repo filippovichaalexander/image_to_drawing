@@ -35,7 +35,7 @@ def add_gost_dimension(
     a1 = _offset_point(x1, y1, nx, ny, offset)
     a2 = _offset_point(x2, y2, nx, ny, offset)
     # Extension lines from object toward dim line (short gap near object)
-    gap = 1.0
+    gap = max(1.0, offset * 0.05)
     e1 = _offset_point(x1, y1, nx, ny, gap)
     e2 = _offset_point(x2, y2, nx, ny, gap)
     layer = LAYER_NAMES["dims"]
@@ -44,10 +44,9 @@ def add_gost_dimension(
     msp.add_line(e2, a2, dxfattribs={"layer": layer})
     msp.add_line(a1, a2, dxfattribs={"layer": layer})
 
-    # 45° ticks length 2–4 mm
-    tick = DIM_TICK_MM
+    # 45° ticks — scale with offset for large model-space drawings
+    tick = max(DIM_TICK_MM, offset * 0.15)
     ang = math.radians(45)
-    # tick direction relative to dim line
     tx = math.cos(ang) * ux - math.sin(ang) * uy
     ty = math.sin(ang) * ux + math.cos(ang) * uy
     for ax, ay in (a1, a2):
@@ -59,7 +58,7 @@ def add_gost_dimension(
 
     label = str(int(round(value_mm if value_mm is not None else length)))
     mx, my = (a1[0] + a2[0]) / 2, (a1[1] + a2[1]) / 2
-    # text slightly above dim line along normal
-    txp, typ = _offset_point(mx, my, nx, ny, 2.5)
-    text = msp.add_text(label, height=2.5, dxfattribs={"layer": layer, "style": "GOST_ST"})
+    text_h = max(2.5, offset * 0.35)
+    txp, typ = _offset_point(mx, my, nx, ny, text_h)
+    text = msp.add_text(label, height=text_h, dxfattribs={"layer": layer, "style": "GOST_ST"})
     text.set_placement((txp, typ))

@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
 import ezdxf
+
+_UESC = re.compile(r"\\[Uu]\+([0-9A-Fa-f]{4,6})")
+
+
+def _dxf_text(raw: str) -> str:
+    """Decode R2000 \\U+XXXX escapes so Cyrillic axis labels are readable."""
+    if not raw:
+        return ""
+    return _UESC.sub(lambda m: chr(int(m.group(1), 16)), str(raw))
 
 
 def _line_entity(e: Any) -> dict[str, Any] | None:
@@ -33,7 +43,7 @@ def _line_entity(e: Any) -> dict[str, Any] | None:
             "layer": layer,
             "type": "text",
             "points": [[float(p.x), float(p.y)]],
-            "text": e.dxf.text,
+            "text": _dxf_text(e.dxf.text),
             "height": float(getattr(e.dxf, "height", 2.5) or 2.5),
         }
     return None
@@ -56,6 +66,12 @@ def dxf_to_scene(dxf_path: Path) -> dict[str, Any]:
         for x, y in item["points"]:
             min_x, max_x = min(min_x, x), max(max_x, x)
             min_y, max_y = min(min_y, y), max(max_y, y)
+        if item["type"] == "text":
+            # Expand bounds a bit for text height
+            h = float(item.get("height") or 0)
+            x, y = item["points"][0]
+            min_x, max_x = min(min_x, x), max(max_x, x + h * max(len(item.get("text") or ""), 1))
+            min_y, max_y = min(min_y, y), max(max_y, y + h)
 
     if not entities:
         min_x = min_y = 0.0

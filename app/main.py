@@ -9,7 +9,6 @@ from fastapi.templating import Jinja2Templates
 
 from app import __version__
 from app.api import router as api_router
-from app.cad.dwg_convert import detect_engines
 from app.config import get_settings
 
 settings = get_settings()
@@ -19,7 +18,7 @@ settings.results_dir.mkdir(parents=True, exist_ok=True)
 BASE = Path(__file__).parent
 app = FastAPI(
     title="Image → Drawing",
-    description="Векторизация архитектурных сканов в DXF/DWG (ГОСТ / СПДС)",
+    description="Векторизация архитектурных сканов в DXF (ГОСТ / СПДС)",
     version=__version__,
 )
 app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
@@ -34,7 +33,7 @@ async def health() -> dict:
         "version": __version__,
         "ai_mode": settings.ai_mode,
         "env": settings.app_env,
-        "dwg": detect_engines(),
+        "export_format": "dxf",
     }
 
 

@@ -115,10 +115,20 @@
 
   function renderLayers(layerState) {
     layerToggles.innerHTML = "";
+    const labels = {
+      "00_FRAME": "00_Оформление",
+      "00_STAMP_TEXT": "00_Текст",
+      "01_WALLS": "01_Стены",
+      "02_PARTITIONS": "02_Перегородки",
+      "03_AXES": "03_Оси",
+      "04_DIMS_GOST": "04_Размеры",
+      "05_OPENINGS": "05_Окна_Двери",
+    };
     Object.keys(layerState).sort().forEach((name) => {
       const id = `layer-${name}`;
       const label = document.createElement("label");
-      label.innerHTML = `<input type="checkbox" id="${id}" ${layerState[name] ? "checked" : ""}> ${name}`;
+      const title = labels[name] || name;
+      label.innerHTML = `<input type="checkbox" id="${id}" ${layerState[name] ? "checked" : ""}> ${title}`;
       label.querySelector("input").addEventListener("change", (e) => {
         state.viewer?.setLayer(name, e.target.checked);
       });
@@ -147,22 +157,20 @@
         setProgress(data.progress || 0, data.step || "");
         if (data.status === "done") {
           clearInterval(state.pollTimer);
-          const dwgNote = data.has_dwg
-            ? `DWG готов (${data.dwg_engine}).`
-            : `DXF в пакете; DWG: ${data.dwg_message || "конвертер недоступен"}.`;
-          let scaleNote = "";
           if (data.needs_scale) {
             scaleHint?.classList.add("is-warn");
-            scaleNote = " Масштаб приблизительный — укажите контрольный отрезок (мм) и запустите снова.";
-            setStatus(`Готово. ${dwgNote}${scaleNote}`, "error");
+            setStatus(
+              "Готово. DXF готов (AutoCAD / LibreCAD). Размеры на листе не прочитались — можно (необязательно) указать контрольный отрезок в мм и запустить снова.",
+              "warn",
+            );
           } else {
             scaleHint?.classList.remove("is-warn");
-            setStatus(`Готово. ${dwgNote}`, "ok");
+            setStatus("Готово. DXF готов — откройте в AutoCAD или LibreCAD.", "ok");
           }
           downloadBtn.disabled = false;
           downloadBtn.removeAttribute("aria-disabled");
           downloadBtn.href = `/api/jobs/${jobId}/download`;
-          downloadBtn.textContent = "Скачать пакет DWG/DXF";
+          downloadBtn.textContent = "Скачать DXF";
           try {
             await loadViewer(jobId);
           } catch (err) {

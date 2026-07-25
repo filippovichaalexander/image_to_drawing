@@ -1,5 +1,5 @@
-# Optional heavy AI stack for AI_MODE=full (not installed in default image)
-ultralytics>=8.3.0
-paddlepaddle>=2.6.0
-paddleocr>=2.8.0
-torch>=2.2.0
+# Optional heavy AI stack for AI_MODE=full
+# Torch CPU is installed separately in Dockerfile (see --index-url pytorch.org/whl/cpu)
+ultralytics>=8.3.0,<9
+paddlepaddle>=2.6.0,<3.0
+paddleocr>=2.8.0,<3

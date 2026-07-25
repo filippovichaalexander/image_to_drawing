@@ -3,28 +3,29 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        INSTALL_FULL_AI: "${INSTALL_FULL_AI:-1}"
     image: image_to_drawing:latest
     container_name: image_to_drawing_web
     ports:
       - "${PORT:-8000}:8000"
-    # Match host UID so bind-mounted data/ is writable without root in container
     user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     environment:
       - APP_ENV=${APP_ENV:-development}
       - UPLOAD_DIR=/app/data/uploads
       - RESULTS_DIR=/app/data/results
       - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-50}
-      - AI_MODE=${AI_MODE:-stub}
-      - DWG_CONVERTER=${DWG_CONVERTER:-auto}
-      - ODA_FC_PATH=${ODA_FC_PATH:-}
+      - AI_MODE=${AI_MODE:-full}
+      - YOLO_CONFIG_DIR=/app/.ultralytics
     volumes:
       - ./app:/app/app:ro
       - ./data/uploads:/app/data/uploads
       - ./data/results:/app/data/results
+      - ./models:/app/models
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      start_period: 60s

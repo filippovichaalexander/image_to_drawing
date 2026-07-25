@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Векторизация архитектурных сканов в DXF/DWG по ГОСТ">
+  <meta name="description" content="Векторизация архитектурных сканов в DXF по ГОСТ">
   <title>Image → Drawing</title>
   <link rel="stylesheet" href="/static/css/app.css">
 </head>
@@ -12,7 +12,7 @@
     <header class="topbar">
       <div class="brand">
         <strong>Image → Drawing</strong>
-        <span>Сканы и фото → DXF/DWG (СПДС / ГОСТ)</span>
+        <span>Сканы и фото → DXF (СПДС / ГОСТ)</span>
       </div>
       <button type="button" class="btn btn-ghost" id="theme-toggle" aria-label="Переключить тему">Тема</button>
     </header>
@@ -74,15 +74,19 @@
           <label>Организация
             <input name="company" type="text" placeholder="Мосреставрация" value="Мосреставрация">
           </label>
-          <label id="scale-hint">Контрольный отрезок (мм)
-            <input name="scale_mm" type="number" min="1" step="1" placeholder="напр. 6000 — длина стены на плане">
+          <label id="scale-hint">Контрольный отрезок (мм) — необязательно
+            <input name="scale_mm" type="number" min="1" step="1" placeholder="оставьте пустым, если размеры есть на чертеже">
           </label>
-          <p class="hint" id="scale-help">Опционально. Если автоматический масштаб неуверен, укажите реальную длину любого отрезка на главном плане.</p>
+          <p class="hint" id="scale-help">
+            Не обязательно. Приложение читает размеры с чертежа (OCR). Это поле — запасной вариант:
+            впишите реальную длину <em>одного</em> известного отрезка на плане в миллиметрах
+            (например стена 6000 мм), только если подписи размеров не распознались.
+          </p>
         </div>
 
         <div class="actions">
           <button type="submit" class="btn btn-primary" id="start-btn" disabled>Обработать</button>
-          <a class="btn" id="download-btn" aria-disabled="true">Скачать пакет DWG/DXF</a>
+          <a class="btn" id="download-btn" aria-disabled="true">Скачать DXF</a>
         </div>
 
         <div class="progress-wrap" id="progress-wrap" aria-live="polite">

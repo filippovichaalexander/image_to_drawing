@@ -20,12 +20,24 @@ SHEET_SIZES = {
     "A1": (594, 841),
 }
 
+# ASCII layer names — R2000 DXF cannot store Cyrillic without \\U+ escapes
+# (breaks WebGL layer toggles). Semantic names follow ТЗ order.
 LAYER_NAMES = {
-    "frame": "00_Оформление",
-    "stamp_text": "00_Текст_Штампа",
-    "walls": "01_Стены_Капитальные",
-    "partitions": "02_Перегородки",
-    "axes": "03_Оси",
-    "dims": "04_Размеры_ГОСТ",
-    "openings": "05_Окна_Двери",
+    "frame": "00_FRAME",
+    "stamp_text": "00_STAMP_TEXT",
+    "walls": "01_WALLS",
+    "partitions": "02_PARTITIONS",
+    "axes": "03_AXES",
+    "dims": "04_DIMS_GOST",
+    "openings": "05_OPENINGS",
+}
+
+LAYER_LABELS_RU = {
+    "00_FRAME": "00_Оформление",
+    "00_STAMP_TEXT": "00_Текст_Штампа",
+    "01_WALLS": "01_Стены",
+    "02_PARTITIONS": "02_Перегородки",
+    "03_AXES": "03_Оси",
+    "04_DIMS_GOST": "04_Размеры",
+    "05_OPENINGS": "05_Окна_Двери",
 }

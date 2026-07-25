@@ -1,11 +1,10 @@
-"""Pipeline runner — ТЗ stages 1–5 + DWG package."""
+"""Pipeline runner — ТЗ stages 1–5 + DXF package."""
 
 from __future__ import annotations
 
 import json
 import time
 import traceback
-from pathlib import Path
 
 from app.config import get_settings
 from app.jobs import JobStatus, jobs
@@ -33,7 +32,7 @@ def run_pipeline(job_id: str) -> None:
 
         cleaned_dir = out_root / "cleaned"
         cleaned_dir.mkdir(parents=True, exist_ok=True)
-        cleaned: list[Path] = []
+        cleaned = []
         for path in sheet_paths:
             out = cleaned_dir / f"{path.stem}_clean.png"
             denoise_image(path, out)
@@ -42,13 +41,16 @@ def run_pipeline(job_id: str) -> None:
         jobs.update(job_id, progress=28, step="Распознавание геометрии / OCR…")
         from app.pipeline.geometry import extract_geometry
 
-        geometry = extract_geometry(cleaned, ai_mode=settings.ai_mode)
+        geometry = extract_geometry(
+            cleaned,
+            ai_mode=settings.ai_mode,
+            source_images=sheet_paths,
+        )
         jobs.update(
             job_id,
             needs_scale=bool(geometry.get("needs_scale")) and not job.metadata.get("scale_mm"),
         )
 
-        # Optional user scale reference (ТЗ: контрольный отрезок)
         scale_mm = job.metadata.get("scale_mm")
         if scale_mm:
             try:
@@ -111,12 +113,12 @@ def run_pipeline(job_id: str) -> None:
         out_dxf = out_root / f"{code}.dxf"
         build_dxf(geometry, job.metadata, out_dxf)
 
-        jobs.update(job_id, progress=88, step="Конвертация DWG + пакет…")
-        from app.cad.dwg_convert import build_download_package
+        jobs.update(job_id, progress=90, step="Упаковка DXF…")
+        from app.cad.package import build_download_package
         from app.cad.scene import dxf_to_scene
 
         package_path = out_root / f"{code}_package.zip"
-        _, conv = build_download_package(out_dxf, package_path, job.metadata)
+        build_download_package(out_dxf, package_path, job.metadata)
         scene = dxf_to_scene(out_dxf)
         (out_root / "scene.json").write_text(
             json.dumps(scene, ensure_ascii=False),
@@ -128,14 +130,11 @@ def run_pipeline(job_id: str) -> None:
             status=JobStatus.done,
             progress=100,
             step="Готово",
-            result_path=package_path,
+            result_path=out_dxf,
             dxf_path=out_dxf,
-            dwg_path=conv.dwg_path,
-            dwg_engine=conv.engine,
-            dwg_message=conv.message,
+            package_path=package_path,
             scene_path=out_root / "scene.json",
         )
-        # tiny pause so UI polls catch intermediate steps in fast stub runs
         time.sleep(0.05)
     except Exception as exc:  # noqa: BLE001
         jobs.update(

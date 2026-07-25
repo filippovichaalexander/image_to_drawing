@@ -1,4 +1,4 @@
-"""HTTP API: jobs, scene for WebGL, DXF/DWG/ZIP download."""
+"""HTTP API: jobs, scene for WebGL, DXF download."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from typing import Annotated, Any
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
-from app.cad.dwg_convert import detect_engines
 from app.config import get_settings
 from app.jobs import JobStatus, jobs
 from app.pipeline.runner import run_pipeline
@@ -62,7 +61,7 @@ async def capabilities() -> dict[str, Any]:
     settings = get_settings()
     return {
         "ai_mode": settings.ai_mode,
-        "dwg": detect_engines(),
+        "export_format": "dxf",
     }
 
 
@@ -137,18 +136,7 @@ async def get_scene(job_id: str) -> JSONResponse:
 
 @router.get("/jobs/{job_id}/download")
 async def download_job(job_id: str) -> FileResponse:
-    job = jobs.get(job_id)
-    if not job or not job.result_path or not job.result_path.exists():
-        raise HTTPException(404, detail="Результат ещё не готов")
-    return FileResponse(
-        path=job.result_path,
-        filename=job.result_path.name,
-        media_type="application/zip",
-    )
-
-
-@router.get("/jobs/{job_id}/dxf")
-async def download_dxf(job_id: str) -> FileResponse:
+    """Primary download: DXF file."""
     job = jobs.get(job_id)
     if not job or not job.dxf_path or not job.dxf_path.exists():
         raise HTTPException(404, detail="DXF ещё не готов")
@@ -159,13 +147,20 @@ async def download_dxf(job_id: str) -> FileResponse:
     )
 
 
-@router.get("/jobs/{job_id}/dwg")
-async def download_dwg(job_id: str) -> FileResponse:
+@router.get("/jobs/{job_id}/dxf")
+async def download_dxf(job_id: str) -> FileResponse:
+    return await download_job(job_id)
+
+
+@router.get("/jobs/{job_id}/package")
+async def download_package(job_id: str) -> FileResponse:
+    """Optional ZIP (DXF + README)."""
     job = jobs.get(job_id)
-    if not job or not job.dwg_path or not job.dwg_path.exists():
-        raise HTTPException(404, detail=job.dwg_message if job else "DWG недоступен")
+    path = job.package_path if job else None
+    if not job or not path or not path.exists():
+        raise HTTPException(404, detail="Пакет ещё не готов")
     return FileResponse(
-        path=job.dwg_path,
-        filename=job.dwg_path.name,
-        media_type="application/acad",
+        path=path,
+        filename=path.name,
+        media_type="application/zip",
     )

@@ -11,19 +11,25 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Process at most this long side — keeps CPU work light; coords scaled to mm.
-MAX_PROC_SIDE = 1600
-# Assumed real-world span when no OCR / user scale is available (plan metres → mm).
+MAX_PROC_SIDE = 1800
 DEFAULT_SPAN_MM = 12000.0
 
 
-def extract_geometry(cleaned_images: list[Path], ai_mode: str = "stub") -> dict[str, Any]:
+def extract_geometry(
+    cleaned_images: list[Path],
+    ai_mode: str = "stub",
+    source_images: list[Path] | None = None,
+) -> dict[str, Any]:
+    """
+    `cleaned_images` — binary denoise outputs (vectorization).
+    `source_images` — original rasters for OCR (preferred; cleaned kills text).
+    """
     if ai_mode == "full":
         try:
             return _extract_full(cleaned_images)
         except Exception as exc:  # noqa: BLE001
             logger.warning("AI_MODE=full failed (%s); falling back to stub", exc)
-    return _extract_stub(cleaned_images, ai_mode=ai_mode)
+    return _extract_stub(cleaned_images, ai_mode=ai_mode, source_images=source_images)
 
 
 def _read_gray(path: Path) -> np.ndarray | None:
@@ -32,7 +38,6 @@ def _read_gray(path: Path) -> np.ndarray | None:
 
 
 def _downscale(img: np.ndarray) -> tuple[np.ndarray, float]:
-    """Return (small_image, scale_to_original) where coords_orig = coords_small * scale."""
     h, w = img.shape[:2]
     long_side = max(h, w)
     if long_side <= MAX_PROC_SIDE:
@@ -43,16 +48,16 @@ def _downscale(img: np.ndarray) -> tuple[np.ndarray, float]:
 
 
 def _extract_full(cleaned_images: list[Path]) -> dict[str, Any]:
-    """
-    YOLOv8-seg + PaddleOCR when packages/weights are present.
-    Raises ImportError/RuntimeError to trigger stub fallback.
-    """
     from ultralytics import YOLO  # type: ignore
     from paddleocr import PaddleOCR  # type: ignore
 
     model_path = Path(__file__).resolve().parents[2] / "models" / "walls_seg.pt"
     if not model_path.exists():
         model_path = Path("yolov8n-seg.pt")
+        logger.warning(
+            "models/walls_seg.pt missing — using %s (run: python scripts/download_models.py)",
+            model_path,
+        )
 
     model = YOLO(str(model_path))
     ocr = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
@@ -104,18 +109,6 @@ def _extract_full(cleaned_images: list[Path]) -> dict[str, Any]:
                             "sheet": sheet_idx,
                         }
                     )
-                upper = text.upper()
-                if upper.startswith("ОСЬ") or upper.startswith("AXIS"):
-                    axes.append(
-                        {
-                            "name": text.split()[-1],
-                            "x": 0,
-                            "y0": 0,
-                            "y1": 8000,
-                            "ocr": text,
-                            "sheet": sheet_idx,
-                        }
-                    )
 
         sheets.append({"index": sheet_idx, "source": path.name, "wall_count": len(sheet_walls)})
 
@@ -137,251 +130,323 @@ def _extract_full(cleaned_images: list[Path]) -> dict[str, Any]:
     }
 
 
-def _ink_mask(img: np.ndarray) -> np.ndarray:
-    """Binary ink=255 on black background, robust to white-on-black cleans."""
-    work = cv2.bitwise_not(img) if float(np.mean(img)) > 127 else img
-    _, binary = cv2.threshold(work, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return binary
+def _merge_h(items: list[tuple[int, int, int]], tol: int = 5) -> list[tuple[int, int, int]]:
+    items = sorted(items, key=lambda t: (t[1], t[0]))
+    out: list[tuple[int, int, int]] = []
+    for x0, y, x1 in items:
+        if out and abs(out[-1][1] - y) <= tol and x0 <= out[-1][2] + 10:
+            px0, py, px1 = out[-1]
+            out[-1] = (min(px0, x0), (py + y) // 2, max(px1, x1))
+        else:
+            out.append((x0, y, x1))
+    return out
 
 
-def _hough_segments(mask: np.ndarray) -> list[tuple[int, int, int, int]]:
-    edges = cv2.Canny(mask, 50, 150, apertureSize=3)
-    h, w = mask.shape[:2]
-    min_len = max(30, int(0.08 * min(h, w)))
+def _merge_v(items: list[tuple[int, int, int]], tol: int = 5) -> list[tuple[int, int, int]]:
+    items = sorted(items, key=lambda t: (t[0], t[1]))
+    out: list[tuple[int, int, int]] = []
+    for x, y0, y1 in items:
+        if out and abs(out[-1][0] - x) <= tol and y0 <= out[-1][2] + 10:
+            px, py0, py1 = out[-1]
+            out[-1] = ((px + x) // 2, min(py0, y0), max(py1, y1))
+        else:
+            out.append((x, y0, y1))
+    return out
+
+
+def _suppress_hatch_h(segs: list[tuple[int, int, int]], band: int = 18) -> list[tuple[int, int, int]]:
+    """Drop stair/furniture hatching: dense parallel H lines → keep none (or envelope)."""
+    if not segs:
+        return []
+    segs = sorted(segs, key=lambda t: t[1])
+    clusters: list[list[tuple[int, int, int]]] = [[segs[0]]]
+    for s in segs[1:]:
+        if abs(s[1] - clusters[-1][-1][1]) <= band:
+            clusters[-1].append(s)
+        else:
+            clusters.append([s])
+    out: list[tuple[int, int, int]] = []
+    for cl in clusters:
+        if len(cl) >= 5:
+            # Hatch pack — skip interior; keep nothing (stairs/furniture)
+            continue
+        out.extend(cl)
+    return out
+
+
+def _suppress_hatch_v(segs: list[tuple[int, int, int]], band: int = 18) -> list[tuple[int, int, int]]:
+    if not segs:
+        return []
+    segs = sorted(segs, key=lambda t: t[0])
+    clusters: list[list[tuple[int, int, int]]] = [[segs[0]]]
+    for s in segs[1:]:
+        if abs(s[0] - clusters[-1][-1][0]) <= band:
+            clusters[-1].append(s)
+        else:
+            clusters.append([s])
+    out: list[tuple[int, int, int]] = []
+    for cl in clusters:
+        if len(cl) >= 5:
+            continue
+        out.extend(cl)
+    return out
+
+
+def _unique_grid_h(segs: list[tuple[int, int, int]], tol: int = 10, limit: int = 14) -> list[tuple[int, int, int]]:
+    """One longest horizontal wall per Y-grid slot."""
+    segs = sorted(segs, key=lambda t: -(t[2] - t[0]))
+    picked: list[tuple[int, int, int]] = []
+    for s in segs:
+        if any(abs(s[1] - p[1]) <= tol for p in picked):
+            continue
+        picked.append(s)
+        if len(picked) >= limit:
+            break
+    return sorted(picked, key=lambda t: t[1])
+
+
+def _unique_grid_v(segs: list[tuple[int, int, int]], tol: int = 10, limit: int = 14) -> list[tuple[int, int, int]]:
+    segs = sorted(segs, key=lambda t: -(t[2] - t[1]))
+    picked: list[tuple[int, int, int]] = []
+    for s in segs:
+        if any(abs(s[0] - p[0]) <= tol for p in picked):
+            continue
+        picked.append(s)
+        if len(picked) >= limit:
+            break
+    return sorted(picked, key=lambda t: t[0])
+
+
+def _extract_ortho_walls(gray: np.ndarray) -> tuple[list[tuple[int, int, int, int]], tuple[float, float, float, float]]:
+    """
+    Structural orthogonal wall centerlines only.
+
+    Filters stair hatching / furniture / dimension ticks that make the CAD
+    look chaotic. Returns segments + building bbox in image pixels.
+    """
+    h, w = gray.shape[:2]
+    blur = cv2.GaussianBlur(gray, (3, 3), 0)
+    edges = cv2.Canny(blur, 70, 170)
+    # Prefer thicker ink (walls) over thin dim ticks
+    _, bw = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    dist = cv2.distanceTransform(bw, cv2.DIST_L2, 5)
+    thick = ((dist >= 1.0).astype(np.uint8) * 255)
+    thick_edges = cv2.Canny(thick, 40, 120)
+    edges = cv2.bitwise_or(edges, thick_edges)
+
+    min_len = max(50, int(0.14 * min(h, w)))
     lines = cv2.HoughLinesP(
         edges,
         rho=1,
         theta=np.pi / 180,
-        threshold=max(40, min_len // 2),
+        threshold=max(55, min_len // 2),
         minLineLength=min_len,
         maxLineGap=8,
     )
-    if lines is None:
-        return []
-    segs: list[tuple[int, int, int, int]] = []
-    for (x1, y1, x2, y2) in lines[:, 0]:
-        # Prefer near-orthogonal segments (architectural drawings)
-        dx, dy = abs(x2 - x1), abs(y2 - y1)
-        if dx < 4 and dy < 4:
-            continue
-        angle = abs(np.degrees(np.arctan2(dy, dx)))
-        if angle <= 12 or angle >= 78:
-            segs.append((int(x1), int(y1), int(x2), int(y2)))
-    return segs[:200]
+    hs: list[tuple[int, int, int]] = []
+    vs: list[tuple[int, int, int]] = []
+    if lines is not None:
+        for x1, y1, x2, y2 in np.asarray(lines).reshape(-1, 4):
+            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+            dx, dy = abs(x2 - x1), abs(y2 - y1)
+            ang = abs(float(np.degrees(np.arctan2(dy, dx))))
+            if ang <= 8:
+                hs.append((min(x1, x2), (y1 + y2) // 2, max(x1, x2)))
+            elif ang >= 82:
+                vs.append(((x1 + x2) // 2, min(y1, y2), max(y1, y2)))
 
+    mh = _unique_grid_h(_suppress_hatch_h(_merge_h(hs)))
+    mv = _unique_grid_v(_suppress_hatch_v(_merge_v(vs)))
 
-def _merge_collinear(
-    segs: list[tuple[int, int, int, int]],
-    tol: int = 12,
-) -> list[tuple[int, int, int, int]]:
-    """Cheap merge of near-collinear axis-aligned segments (O(n²), n≤200)."""
-    horiz: list[list[int]] = []  # y, x0, x1
-    vert: list[list[int]] = []  # x, y0, y1
-    for x1, y1, x2, y2 in segs:
-        if abs(y2 - y1) <= abs(x2 - x1):
-            y = (y1 + y2) // 2
-            xa, xb = sorted((x1, x2))
-            horiz.append([y, xa, xb])
-        else:
-            x = (x1 + x2) // 2
-            ya, yb = sorted((y1, y2))
-            vert.append([x, ya, yb])
-
-    def merge_1d(items: list[list[int]], axis_idx: int) -> list[list[int]]:
-        if not items:
-            return []
-        items = sorted(items, key=lambda t: (t[0], t[1]))
-        out: list[list[int]] = [items[0][:]]
-        for cur in items[1:]:
-            prev = out[-1]
-            if abs(cur[0] - prev[0]) <= tol and cur[1] <= prev[2] + tol:
-                prev[2] = max(prev[2], cur[2])
-                prev[0] = (prev[0] + cur[0]) // 2
-            else:
-                out.append(cur[:])
-        return out
-
-    mh = merge_1d(horiz, 0)
-    mv = merge_1d(vert, 0)
-    merged: list[tuple[int, int, int, int]] = []
-    for y, x0, x1 in mh:
-        if x1 - x0 >= tol:
-            merged.append((x0, y, x1, y))
+    xs: list[float] = []
+    ys: list[float] = []
+    for x0, y, x1 in mh:
+        xs.extend((x0, x1))
+        ys.append(float(y))
     for x, y0, y1 in mv:
-        if y1 - y0 >= tol:
-            merged.append((x, y0, x, y1))
-    return merged
+        xs.append(float(x))
+        ys.extend((y0, y1))
+    if len(xs) < 2:
+        return [], (0.0, 0.0, float(w), float(h))
+
+    # Tighter bbox from structural grid (not dimension rings)
+    x0, x1 = float(np.percentile(xs, 8)), float(np.percentile(xs, 92))
+    y0, y1 = float(np.percentile(ys, 8)), float(np.percentile(ys, 92))
+    # Prefer extent of the longest H/V as building sides when available
+    if mh:
+        longest_h = max(mh, key=lambda t: t[2] - t[0])
+        x0, x1 = float(longest_h[0]), float(longest_h[2])
+    if mv:
+        longest_v = max(mv, key=lambda t: t[2] - t[1])
+        y0, y1 = float(longest_v[1]), float(longest_v[2])
+    # Expand to cover other long walls
+    for sx0, sy, sx1 in mh:
+        if (sx1 - sx0) >= 0.55 * (x1 - x0):
+            x0, x1 = min(x0, float(sx0)), max(x1, float(sx1))
+            y0, y1 = min(y0, float(sy)), max(y1, float(sy))
+    for sx, sy0, sy1 in mv:
+        if (sy1 - sy0) >= 0.55 * (y1 - y0):
+            y0, y1 = min(y0, float(sy0)), max(y1, float(sy1))
+            x0, x1 = min(x0, float(sx)), max(x1, float(sx))
+
+    pad = 0.005 * max(w, h)
+    x0, y0 = max(0.0, x0 - pad), max(0.0, y0 - pad)
+    x1, y1 = min(float(w), x1 + pad), min(float(h), y1 + pad)
+
+    segs: list[tuple[int, int, int, int]] = []
+    # Clip internal walls to bbox
+    for sx0, sy, sx1 in mh:
+        if y0 - 15 <= sy <= y1 + 15:
+            a, b = max(int(x0), sx0), min(int(x1), sx1)
+            if b - a >= min_len * 0.5:
+                segs.append((a, int(sy), b, int(sy)))
+    for sx, sy0, sy1 in mv:
+        if x0 - 15 <= sx <= x1 + 15:
+            a, b = max(int(y0), sy0), min(int(y1), sy1)
+            if b - a >= min_len * 0.5:
+                segs.append((int(sx), a, int(sx), b))
+
+    # Outer closed rectangle (true building envelope)
+    segs = [
+        (int(x0), int(y0), int(x1), int(y0)),
+        (int(x1), int(y0), int(x1), int(y1)),
+        (int(x1), int(y1), int(x0), int(y1)),
+        (int(x0), int(y1), int(x0), int(y0)),
+        *segs,
+    ]
+    return segs, (x0, y0, x1, y1)
 
 
-def _outer_contour_poly(mask: np.ndarray) -> list[list[float]] | None:
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None
-    cnt = max(contours, key=cv2.contourArea)
-    h, w = mask.shape[:2]
-    if cv2.contourArea(cnt) < 0.01 * w * h:
-        return None
-    approx = cv2.approxPolyDP(cnt, 0.008 * cv2.arcLength(cnt, True), True)
-    if len(approx) < 3:
-        return None
-    poly = [[float(p[0][0]), float(p[0][1])] for p in approx]
-    poly.append(poly[0])
-    return poly
-
-
-def _openings_from_gaps(
-    mask: np.ndarray,
-    segs: list[tuple[int, int, int, int]],
-) -> list[dict[str, Any]]:
-    """
-    Heuristic openings: long wall segments with a mid-gap → window/door slot.
-    Fast morphology on downscaled mask; no neural net.
-    """
-    h, w = mask.shape[:2]
-    openings: list[dict[str, Any]] = []
-    # Dilate ink slightly, then look for rectangular voids near long edges
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    thick = cv2.dilate(mask, kernel, iterations=1)
-    inv = cv2.bitwise_not(thick)
-    # Ignore border frame
-    margin = max(8, int(0.03 * min(h, w)))
-    inv[:margin, :] = 0
-    inv[-margin:, :] = 0
-    inv[:, :margin] = 0
-    inv[:, -margin:] = 0
-    contours, _ = cv2.findContours(inv, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    for cnt in contours:
-        x, y, bw, bh = cv2.boundingRect(cnt)
-        area = bw * bh
-        if area < 0.0008 * w * h or area > 0.08 * w * h:
-            continue
-        aspect = max(bw, bh) / max(min(bw, bh), 1)
-        if aspect < 1.4 or aspect > 12:
-            continue
-        # Prefer slots adjacent to a Hough wall
-        cx, cy = x + bw / 2, y + bh / 2
-        near_wall = False
-        for x1, y1, x2, y2 in segs:
-            dist = abs((y2 - y1) * cx - (x2 - x1) * cy + x2 * y1 - y2 * x1) / (
-                max(np.hypot(x2 - x1, y2 - y1), 1.0)
-            )
-            if dist < 18:
-                near_wall = True
-                break
-        if not near_wall:
-            continue
-        kind = "door" if min(bw, bh) > 0.04 * min(h, w) else "window"
-        openings.append(
-            {
-                "type": kind,
-                "p1": [float(x), float(y + bh)],
-                "p2": [float(x + bw), float(y)],
-                "width_px": float(bw),
-                "height_px": float(bh),
-            }
-        )
-        if len(openings) >= 24:
-            break
-    return openings
-
-
-def _px_to_mm(
-    x: float,
-    y: float,
-    h: int,
-    scale_x: float,
-    scale_y: float,
-) -> list[float]:
-    # Image origin top-left → CAD origin bottom-left
+def _px_to_mm(x: float, y: float, h: int, scale_x: float, scale_y: float) -> list[float]:
     return [float(x * scale_x), float((h - y) * scale_y)]
 
 
-def _sheet_geometry(path: Path, sheet_idx: int) -> dict[str, Any]:
+def _classify_wall_len(length_px: float, min_side: float) -> str:
+    if length_px >= 0.22 * min_side:
+        return "wall"
+    if length_px >= 0.08 * min_side:
+        return "partition"
+    return "skip"
+
+
+def _sheet_geometry(
+    path: Path,
+    sheet_idx: int,
+    ocr_path: Path | None = None,
+) -> dict[str, Any]:
     img = _read_gray(path)
     if img is None:
         return {"walls": [], "partitions": [], "openings": [], "axes": [], "dimensions": [], "ok": False}
 
-    small, up = _downscale(img)
-    mask = _ink_mask(small)
+    # Prefer a less-destroyed source for edges when available
+    ocr_src = ocr_path or path
+    edge_img = _read_gray(ocr_src) if ocr_path else img
+    if edge_img is None:
+        edge_img = img
+
+    small, up = _downscale(edge_img)
     sh, sw = small.shape[:2]
-    segs = _merge_collinear(_hough_segments(mask))
-    outer = _outer_contour_poly(mask)
-    openings_px = _openings_from_gaps(mask, segs)
+    segs_px, bbox = _extract_ortho_walls(small)
+    x0, y0, x1, y1 = bbox
+    bbox_w_px = max(x1 - x0, 1.0)
+    bbox_h_px = max(y1 - y0, 1.0)
 
-    # Map processing pixels → assumed mm span of the long side
-    long_px = max(sw, sh)
-    mm_per_px = DEFAULT_SPAN_MM / max(long_px, 1)
-    scale_x = scale_y = mm_per_px
+    from app.pipeline.ocr_dims import calibrate_span_mm, extract_dimension_labels
 
+    labels = extract_dimension_labels(ocr_src)
+    calib = calibrate_span_mm(labels, bbox_w_px, bbox_h_px)
+    if calib:
+        scale_x = float(calib["span_x_mm"]) / bbox_w_px
+        scale_y = float(calib["span_y_mm"]) / bbox_h_px
+        score = float(calib["confidence"])
+        scale_source = "ocr"
+    else:
+        long_px = max(bbox_w_px, bbox_h_px)
+        mm_per_px = DEFAULT_SPAN_MM / max(long_px, 1)
+        scale_x = scale_y = mm_per_px
+        scale_source = "default"
+        score = 0.35
+
+    # up is full/small; segments are in `small` space already
     walls: list[list[list[float]]] = []
     partitions: list[list[list[float]]] = []
+    min_side = float(min(sw, sh))
 
-    if outer:
-        walls.append([_px_to_mm(p[0], p[1], sh, scale_x, scale_y) for p in outer])
+    outer = [
+        _px_to_mm(x0, y0, sh, scale_x, scale_y),
+        _px_to_mm(x1, y0, sh, scale_x, scale_y),
+        _px_to_mm(x1, y1, sh, scale_x, scale_y),
+        _px_to_mm(x0, y1, sh, scale_x, scale_y),
+        _px_to_mm(x0, y0, sh, scale_x, scale_y),
+    ]
+    walls.append(outer)
 
-    # Build thin wall polylines from merged Hough segments (as 2-point walls)
-    wall_lines: list[list[list[float]]] = []
-    for x1, y1, x2, y2 in segs:
-        length = np.hypot(x2 - x1, y2 - y1)
-        p1 = _px_to_mm(x1, y1, sh, scale_x, scale_y)
-        p2 = _px_to_mm(x2, y2, sh, scale_x, scale_y)
-        if length > 0.25 * min(sw, sh):
-            wall_lines.append([p1, p2])
-        elif length > 0.08 * min(sw, sh):
-            partitions.append([p1, p2])
+    # Internal segments only (outer rectangle already added as closed poly)
+    for xa, ya, xb, yb in segs_px[4:] if len(segs_px) > 4 else []:
+        length = float(np.hypot(xb - xa, yb - ya))
+        kind = _classify_wall_len(length, min_side)
+        if kind == "skip":
+            continue
+        # Skip near-duplicates of the envelope
+        if length >= 0.85 * max(bbox_w_px, bbox_h_px):
+            continue
+        p1 = _px_to_mm(xa, ya, sh, scale_x, scale_y)
+        p2 = _px_to_mm(xb, yb, sh, scale_x, scale_y)
+        (walls if kind == "wall" else partitions).append([p1, p2])
 
-    # If no outer contour, synthesize a bounding box from long lines
-    if not walls and wall_lines:
-        xs = [p[0] for line in wall_lines for p in line]
-        ys = [p[1] for line in wall_lines for p in line]
-        walls.append(
-            [
-                [min(xs), min(ys)],
-                [max(xs), min(ys)],
-                [max(xs), max(ys)],
-                [min(xs), max(ys)],
-                [min(xs), min(ys)],
-            ]
-        )
-    walls.extend(wall_lines)
-
-    openings: list[dict[str, Any]] = []
-    for op in openings_px:
-        p1 = _px_to_mm(op["p1"][0], op["p1"][1], sh, scale_x, scale_y)
-        p2 = _px_to_mm(op["p2"][0], op["p2"][1], sh, scale_x, scale_y)
-        openings.append(
-            {
-                "type": op["type"],
-                "p1": p1,
-                "p2": p2,
-                "sheet": sheet_idx,
-                "from": "opencv_gap",
-            }
-        )
-
-    # Bounds for axes / overall dims
-    pts = [p for wall in walls for p in wall] or [[0.0, 0.0], [DEFAULT_SPAN_MM, DEFAULT_SPAN_MM * 0.67]]
-    xs = [p[0] for p in pts]
-    ys = [p[1] for p in pts]
+    pts = [p for poly in walls + partitions for p in poly]
+    xs = [p[0] for p in pts] or [0.0, DEFAULT_SPAN_MM]
+    ys = [p[1] for p in pts] or [0.0, DEFAULT_SPAN_MM * 0.67]
     min_x, max_x = min(xs), max(xs)
     min_y, max_y = min(ys), max(ys)
 
-    dimensions = [
+    dimensions: list[dict[str, Any]] = [
         {
-            "p1": [min_x, min_y],
-            "p2": [max_x, min_y],
-            "value_mm": round(max_x - min_x),
+            "p1": [min_x, min_y - max(400.0, (max_y - min_y) * 0.04)],
+            "p2": [max_x, min_y - max(400.0, (max_y - min_y) * 0.04)],
+            "value_mm": int(round(max_x - min_x)),
             "sheet": sheet_idx,
             "role": "overall_x",
+            "source": scale_source,
         },
         {
-            "p1": [min_x, min_y],
-            "p2": [min_x, max_y],
-            "value_mm": round(max_y - min_y),
+            "p1": [min_x - max(400.0, (max_x - min_x) * 0.04), min_y],
+            "p2": [min_x - max(400.0, (max_x - min_x) * 0.04), max_y],
+            "value_mm": int(round(max_y - min_y)),
             "sheet": sheet_idx,
             "role": "overall_y",
+            "source": scale_source,
         },
     ]
+    # OCR numbers as text labels at their image position (not fake dim chains)
+    texts: list[dict[str, Any]] = []
+    for lab in labels[:30]:
+        if lab.get("is_area"):
+            continue
+        v = int(lab["value_mm"])
+        # Skip tiny thickness-like and keep architectural spans
+        if v < 800:
+            continue
+        ocr_scale = float(lab.get("ocr_scale") or 1.0)
+        full_cx = lab["cx"] / ocr_scale
+        full_cy = lab["cy"] / ocr_scale
+        sx, sy = full_cx / up, full_cy / up
+        # Only labels near / inside building bbox (±margin)
+        margin = 0.12 * max(bbox_w_px, bbox_h_px)
+        if not (x0 - margin <= sx <= x1 + margin and y0 - margin <= sy <= y1 + margin):
+            continue
+        cx, cy = _px_to_mm(sx, sy, sh, scale_x, scale_y)
+        texts.append(
+            {
+                "text": str(v),
+                "pos": [cx, cy],
+                "height": max(120.0, min(bbox_w_px, bbox_h_px) * scale_x * 0.025),
+                "sheet": sheet_idx,
+                "source": "ocr",
+                "conf": lab.get("conf"),
+            }
+        )
+
     axes = [
         {"name": "1", "x": min_x, "y0": min_y - 1500, "y1": max_y + 1500, "sheet": sheet_idx},
         {"name": "2", "x": max_x, "y0": min_y - 1500, "y1": max_y + 1500, "sheet": sheet_idx},
@@ -389,32 +454,31 @@ def _sheet_geometry(path: Path, sheet_idx: int) -> dict[str, Any]:
         {"name": "Б", "y": max_y, "x0": min_x - 1500, "x1": max_x + 1500, "sheet": sheet_idx},
     ]
 
-    # Confidence: more orthogonal structure → higher; still ask for scale without OCR
-    score = 0.25
-    if outer:
-        score += 0.2
-    if len(segs) >= 4:
-        score += 0.15
-    if openings:
-        score += 0.1
-    score = min(score, 0.65)
-
     return {
         "ok": True,
         "walls": walls,
         "partitions": partitions,
-        "openings": openings,
+        "openings": [],
         "axes": axes,
         "dimensions": dimensions,
+        "texts": texts,
         "scale_confidence": score,
+        "scale_source": scale_source,
+        "ocr_values": (calib or {}).get("ocr_values", []),
         "proc_size": [sw, sh],
         "upscale": up,
         "source": path.name,
         "index": sheet_idx,
+        "bbox_mm": [min_x, min_y, max_x, max_y],
     }
 
 
-def _extract_stub(cleaned_images: list[Path], ai_mode: str = "stub") -> dict[str, Any]:
+def _extract_stub(
+    cleaned_images: list[Path],
+    ai_mode: str = "stub",
+    source_images: list[Path] | None = None,
+) -> dict[str, Any]:
+    sources = list(source_images or [])
     if not cleaned_images:
         walls = [[[0, 0], [12000, 0], [12000, 8000], [0, 8000], [0, 0]]]
         return {
@@ -441,17 +505,23 @@ def _extract_stub(cleaned_images: list[Path], ai_mode: str = "stub") -> dict[str
     openings: list[dict[str, Any]] = []
     axes: list[dict[str, Any]] = []
     dimensions: list[dict[str, Any]] = []
+    texts: list[dict[str, Any]] = []
     sheets: list[dict[str, Any]] = []
     confidences: list[float] = []
+    ocr_hit = False
+    ocr_values: list[int] = []
 
     for idx, path in enumerate(cleaned_images):
-        sheet = _sheet_geometry(path, idx)
+        ocr_path = sources[idx] if idx < len(sources) else path
+        sheet = _sheet_geometry(path, idx, ocr_path=ocr_path)
         sheets.append(
             {
                 "index": idx,
                 "source": sheet.get("source", path.name),
                 "ok": sheet.get("ok", False),
                 "proc_size": sheet.get("proc_size"),
+                "scale_source": sheet.get("scale_source"),
+                "ocr_values": sheet.get("ocr_values") or [],
             }
         )
         if not sheet.get("ok"):
@@ -459,22 +529,20 @@ def _extract_stub(cleaned_images: list[Path], ai_mode: str = "stub") -> dict[str
         walls.extend(sheet["walls"])
         partitions.extend(sheet["partitions"])
         openings.extend(sheet["openings"])
-        # Keep axes/dims from first successful sheet as primary; others tagged for correlate
-        if idx == 0 or not axes:
-            axes.extend(sheet["axes"])
-            dimensions.extend(sheet["dimensions"])
-        else:
-            for a in sheet["axes"]:
-                axes.append(a)
-            for d in sheet["dimensions"]:
-                dimensions.append(d)
+        axes.extend(sheet["axes"])
+        dimensions.extend(sheet["dimensions"])
+        texts.extend(sheet.get("texts") or [])
         confidences.append(float(sheet.get("scale_confidence", 0.2)))
+        if sheet.get("scale_source") == "ocr":
+            ocr_hit = True
+            ocr_values.extend(int(v) for v in (sheet.get("ocr_values") or []))
 
     if not walls:
         walls.append([[0, 0], [12000, 0], [12000, 8000], [0, 8000], [0, 0]])
         confidences.append(0.1)
 
     mean_conf = sum(confidences) / max(len(confidences), 1)
+    needs_scale = (not ocr_hit) and mean_conf < 0.5
     return {
         "mode": ai_mode,
         "walls": walls,
@@ -482,9 +550,12 @@ def _extract_stub(cleaned_images: list[Path], ai_mode: str = "stub") -> dict[str
         "openings": openings,
         "axes": axes,
         "dimensions": dimensions,
+        "texts": texts,
         "sheets": sheets,
         "units": "mm",
         "source_count": len(cleaned_images),
         "scale_confidence": round(mean_conf, 3),
-        "needs_scale": mean_conf < 0.5,
+        "scale_source": "ocr" if ocr_hit else "default",
+        "ocr_values": ocr_values[:12],
+        "needs_scale": needs_scale,
     }

@@ -1,13 +1,23 @@
-/* Lightweight WebGL orthographic line viewer for DXF scene JSON */
+/* Lightweight WebGL line viewer + 2D canvas text overlay (GOST dim/axis labels) */
 (() => {
   const LAYER_COLORS = {
-    "00_Оформление": [0.85, 0.85, 0.85],
-    "00_Текст_Штампа": [0.75, 0.8, 0.9],
-    "01_Стены_Капитальные": [0.95, 0.35, 0.3],
-    "02_Перегородки": [0.95, 0.8, 0.25],
-    "03_Оси": [0.25, 0.85, 0.9],
-    "04_Размеры_ГОСТ": [0.35, 0.9, 0.45],
-    "05_Окна_Двери": [0.35, 0.55, 1.0],
+    "00_FRAME": [0.55, 0.58, 0.62],
+    "00_STAMP_TEXT": [0.45, 0.5, 0.6],
+    "01_WALLS": [0.85, 0.2, 0.18],
+    "02_PARTITIONS": [0.85, 0.65, 0.15],
+    "03_AXES": [0.1, 0.7, 0.78],
+    "04_DIMS_GOST": [0.12, 0.65, 0.28],
+    "05_OPENINGS": [0.25, 0.4, 0.95],
+  };
+
+  const LAYER_LABELS = {
+    "00_FRAME": "00_Оформление",
+    "00_STAMP_TEXT": "00_Текст_Штампа",
+    "01_WALLS": "01_Стены",
+    "02_PARTITIONS": "02_Перегородки",
+    "03_AXES": "03_Оси",
+    "04_DIMS_GOST": "04_Размеры",
+    "05_OPENINGS": "05_Окна_Двери",
   };
 
   function hexThemeLine() {
@@ -15,17 +25,38 @@
     return dark ? [0.12, 0.16, 0.22] : [0.92, 0.94, 0.96];
   }
 
+  function rgbCss(rgb) {
+    return `rgb(${Math.round(rgb[0] * 255)},${Math.round(rgb[1] * 255)},${Math.round(rgb[2] * 255)})`;
+  }
+
   class DxfWebGLViewer {
     constructor(container) {
       this.container = container;
+      this.container.style.position = "relative";
+      this.container.innerHTML = "";
+
       this.canvas = document.createElement("canvas");
       this.canvas.className = "viewer-canvas";
       this.canvas.setAttribute("tabindex", "0");
-      container.innerHTML = "";
-      container.appendChild(this.canvas);
+      this.canvas.style.display = "block";
+      this.canvas.style.width = "100%";
+      this.canvas.style.height = "100%";
+
+      this.textCanvas = document.createElement("canvas");
+      this.textCanvas.className = "viewer-text-canvas";
+      this.textCanvas.style.position = "absolute";
+      this.textCanvas.style.left = "0";
+      this.textCanvas.style.top = "0";
+      this.textCanvas.style.width = "100%";
+      this.textCanvas.style.height = "100%";
+      this.textCanvas.style.pointerEvents = "none";
+
+      this.container.appendChild(this.canvas);
+      this.container.appendChild(this.textCanvas);
 
       this.gl = this.canvas.getContext("webgl", { antialias: true })
         || this.canvas.getContext("experimental-webgl");
+      this.tctx = this.textCanvas.getContext("2d");
       if (!this.gl) {
         container.textContent = "WebGL недоступен в этом браузере.";
         return;
@@ -102,7 +133,6 @@
         const dx = e.clientX - this._last[0];
         const dy = e.clientY - this._last[1];
         this._last = [e.clientX, e.clientY];
-        // Convert screen px to world approx via resolve
         const scale = (this._resolveY * 2) / this.canvas.height;
         this.panX += dx * scale;
         this.panY -= dy * scale;
@@ -116,14 +146,29 @@
     _resize() {
       const rect = this.container.getBoundingClientRect();
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      this.canvas.width = Math.max(2, Math.floor(rect.width * dpr));
-      this.canvas.height = Math.max(2, Math.floor(Math.max(rect.height, 320) * dpr));
-      this.canvas.style.width = `${rect.width}px`;
-      this.canvas.style.height = `${Math.max(rect.height, 320)}px`;
+      const w = Math.max(2, Math.floor(rect.width * dpr));
+      const h = Math.max(2, Math.floor(Math.max(rect.height, 320) * dpr));
+      for (const c of [this.canvas, this.textCanvas]) {
+        c.width = w;
+        c.height = h;
+        c.style.width = `${rect.width}px`;
+        c.style.height = `${Math.max(rect.height, 320)}px`;
+      }
       if (this.gl) {
-        this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+        this.gl.viewport(0, 0, w, h);
         this.draw();
       }
+    }
+
+    /** World mm → canvas pixel */
+    _worldToScreen(x, y) {
+      const cx = this._center[0];
+      const cy = this._center[1];
+      const px = (x - cx) * this.zoom + this.panX;
+      const py = (y - cy) * this.zoom + this.panY;
+      const sx = (px / this._resolveX) * 0.5 + 0.5;
+      const sy = 0.5 - (py / this._resolveY) * 0.5;
+      return [sx * this.canvas.width, sy * this.canvas.height];
     }
 
     setScene(scene) {
@@ -141,6 +186,12 @@
       this.panX = 0;
       this.panY = 0;
       this.draw();
+      // Expose Russian labels for UI toggles
+      const labeled = {};
+      Object.keys(this.layersOn).forEach((k) => {
+        labeled[k] = this.layersOn[k];
+      });
+      labeled.__labels = LAYER_LABELS;
       return this.layersOn;
     }
 
@@ -165,13 +216,18 @@
       gl.uniform2f(this.uPan, this.panX, this.panY);
 
       const byLayer = {};
+      const texts = [];
       for (const e of this.scene.entities || []) {
         if (this.layersOn[e.layer] === false) continue;
+        if (e.type === "text") {
+          texts.push(e);
+          continue;
+        }
         if (!byLayer[e.layer]) byLayer[e.layer] = [];
         const pts = e.points || [];
         if (e.type === "line" && pts.length >= 2) {
           byLayer[e.layer].push(pts[0][0], pts[0][1], pts[1][0], pts[1][1]);
-        } else if ((e.type === "polyline" || e.type === "text") && pts.length) {
+        } else if (e.type === "polyline" && pts.length) {
           for (let i = 0; i < pts.length - 1; i++) {
             byLayer[e.layer].push(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]);
           }
@@ -194,8 +250,38 @@
         gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(arr), gl.DYNAMIC_DRAW);
         gl.drawArrays(gl.LINES, 0, arr.length / 2);
       }
+
+      this._drawTexts(texts);
+    }
+
+    _drawTexts(texts) {
+      const ctx = this.tctx;
+      if (!ctx) return;
+      ctx.clearRect(0, 0, this.textCanvas.width, this.textCanvas.height);
+      const dark = document.documentElement.getAttribute("data-theme") !== "light";
+      for (const e of texts) {
+        const [x, y] = e.points[0] || [0, 0];
+        const [sx, sy] = this._worldToScreen(x, y);
+        if (sx < -80 || sy < -40 || sx > this.textCanvas.width + 80 || sy > this.textCanvas.height + 40) {
+          continue;
+        }
+        // World height → screen px
+        const [, sy2] = this._worldToScreen(x, y + (e.height || 100));
+        const pxH = Math.max(9, Math.min(36, Math.abs(sy - sy2)));
+        const color = LAYER_COLORS[e.layer] || [0.2, 0.2, 0.2];
+        ctx.font = `600 ${pxH}px "Segoe UI", "DejaVu Sans", sans-serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.lineWidth = Math.max(2, pxH * 0.12);
+        ctx.strokeStyle = dark ? "rgba(0,0,0,0.65)" : "rgba(255,255,255,0.85)";
+        ctx.fillStyle = rgbCss(color);
+        const label = e.text || "";
+        ctx.strokeText(label, sx, sy);
+        ctx.fillText(label, sx, sy);
+      }
     }
   }
 
   window.DxfWebGLViewer = DxfWebGLViewer;
+  window.DXF_LAYER_LABELS = LAYER_LABELS;
 })();
