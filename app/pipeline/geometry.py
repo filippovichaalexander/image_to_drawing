@@ -23,13 +23,23 @@ def extract_geometry(
     """
     `cleaned_images` — binary denoise outputs (vectorization).
     `source_images` — original rasters for OCR (preferred; cleaned kills text).
+
+    Primary path is OpenCV stub: OCR→dimension-chain scale, contour post-process,
+    closedness checks. YOLO (AI_MODE=full) is a fallback when stub finds no walls.
     """
+    stub = _extract_stub(cleaned_images, ai_mode=ai_mode, source_images=source_images)
+    if stub.get("walls") and any(len(w) >= 2 for w in stub["walls"]):
+        # Mark mode full if requested, but keep stub geometry/scale
+        if ai_mode == "full":
+            stub["mode"] = "full+stub"
+        return stub
+
     if ai_mode == "full":
         try:
             return _extract_full(cleaned_images)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("AI_MODE=full failed (%s); falling back to stub", exc)
-    return _extract_stub(cleaned_images, ai_mode=ai_mode, source_images=source_images)
+            logger.warning("AI_MODE=full failed (%s); using stub geometry", exc)
+    return stub
 
 
 def _read_gray(path: Path) -> np.ndarray | None:
@@ -115,17 +125,27 @@ def _extract_full(cleaned_images: list[Path]) -> dict[str, Any]:
     if not walls:
         raise RuntimeError("YOLO produced no wall masks")
 
+    from app.pipeline.postprocess import postprocess_walls
+
+    walls, partitions, closedness = postprocess_walls(walls, [])
+    scale_warning = (
+        "Полный AI-режим: масштаб по умолчанию условный (12 000 мм). "
+        "Укажите контрольный отрезок в мм."
+    )
     return {
         "mode": "full",
         "walls": walls,
-        "partitions": [],
+        "partitions": partitions,
         "openings": openings,
         "axes": axes,
         "dimensions": dimensions,
         "sheets": sheets,
         "units": "mm",
         "source_count": len(cleaned_images),
-        "scale_confidence": 0.55,
+        "scale_confidence": 0.35,
+        "scale_source": "provisional",
+        "scale_warning": scale_warning,
+        "closedness": closedness,
         "needs_scale": True,
     }
 
@@ -352,20 +372,37 @@ def _sheet_geometry(
     bbox_h_px = max(y1 - y0, 1.0)
 
     from app.pipeline.ocr_dims import calibrate_span_mm, extract_dimension_labels
+    from app.pipeline.postprocess import postprocess_walls
 
     labels = extract_dimension_labels(ocr_src)
-    calib = calibrate_span_mm(labels, bbox_w_px, bbox_h_px)
+    # OCR coords → process (`small`) space: full = ocr/ocr_scale, proc = full/up
+    ocr_scale0 = float(labels[0]["ocr_scale"]) if labels else 1.0
+    ocr_to_proc = 1.0 / max(ocr_scale0 * up, 1e-9)
+    calib = calibrate_span_mm(
+        labels,
+        bbox_w_px,
+        bbox_h_px,
+        segments_px=segs_px,
+        ocr_to_proc=ocr_to_proc,
+    )
+    scale_warning: str | None = None
     if calib:
-        scale_x = float(calib["span_x_mm"]) / bbox_w_px
-        scale_y = float(calib["span_y_mm"]) / bbox_h_px
+        scale_x = float(calib["mm_per_px_x"])
+        scale_y = float(calib["mm_per_px_y"])
         score = float(calib["confidence"])
-        scale_source = "ocr"
+        scale_source = str(calib.get("scale_source") or "ocr_chain")
+        scale_warning = calib.get("warning")
     else:
+        # Provisional display scale only — never treat 12 000 mm as measured
         long_px = max(bbox_w_px, bbox_h_px)
         mm_per_px = DEFAULT_SPAN_MM / max(long_px, 1)
         scale_x = scale_y = mm_per_px
-        scale_source = "default"
-        score = 0.35
+        scale_source = "provisional"
+        score = 0.2
+        scale_warning = (
+            "Размерные надписи не найдены или не сопоставлены с цепочками. "
+            "Применён условный масштаб 12 000 мм по длинной стороне — укажите контрольный отрезок."
+        )
 
     # up is full/small; segments are in `small` space already
     walls: list[list[list[float]]] = []
@@ -393,6 +430,8 @@ def _sheet_geometry(
         p1 = _px_to_mm(xa, ya, sh, scale_x, scale_y)
         p2 = _px_to_mm(xb, yb, sh, scale_x, scale_y)
         (walls if kind == "wall" else partitions).append([p1, p2])
+
+    walls, partitions, closedness = postprocess_walls(walls, partitions)
 
     pts = [p for poly in walls + partitions for p in poly]
     xs = [p[0] for p in pts] or [0.0, DEFAULT_SPAN_MM]
@@ -464,7 +503,10 @@ def _sheet_geometry(
         "texts": texts,
         "scale_confidence": score,
         "scale_source": scale_source,
+        "scale_warning": scale_warning,
         "ocr_values": (calib or {}).get("ocr_values", []),
+        "ocr_chain_matches": (calib or {}).get("matches"),
+        "closedness": closedness,
         "proc_size": [sw, sh],
         "upscale": up,
         "source": path.name,
@@ -496,6 +538,10 @@ def _extract_stub(
             "sheets": [],
             "units": "mm",
             "scale_confidence": 0.1,
+            "scale_source": "provisional",
+            "scale_warning": (
+                "Нет входных листов; условный контур 12 000 мм. Укажите контрольный отрезок."
+            ),
             "needs_scale": True,
             "source_count": 0,
         }
@@ -508,7 +554,9 @@ def _extract_stub(
     texts: list[dict[str, Any]] = []
     sheets: list[dict[str, Any]] = []
     confidences: list[float] = []
-    ocr_hit = False
+    scale_sources: list[str] = []
+    warnings: list[str] = []
+    closedness_reports: list[dict[str, Any]] = []
     ocr_values: list[int] = []
 
     for idx, path in enumerate(cleaned_images):
@@ -522,6 +570,7 @@ def _extract_stub(
                 "proc_size": sheet.get("proc_size"),
                 "scale_source": sheet.get("scale_source"),
                 "ocr_values": sheet.get("ocr_values") or [],
+                "closedness": sheet.get("closedness"),
             }
         )
         if not sheet.get("ok"):
@@ -533,16 +582,40 @@ def _extract_stub(
         dimensions.extend(sheet["dimensions"])
         texts.extend(sheet.get("texts") or [])
         confidences.append(float(sheet.get("scale_confidence", 0.2)))
-        if sheet.get("scale_source") == "ocr":
-            ocr_hit = True
+        src = str(sheet.get("scale_source") or "provisional")
+        scale_sources.append(src)
+        if sheet.get("scale_warning"):
+            warnings.append(str(sheet["scale_warning"]))
+        if sheet.get("closedness"):
+            closedness_reports.append(sheet["closedness"])
+        if src.startswith("ocr"):
             ocr_values.extend(int(v) for v in (sheet.get("ocr_values") or []))
 
     if not walls:
         walls.append([[0, 0], [12000, 0], [12000, 8000], [0, 8000], [0, 0]])
         confidences.append(0.1)
+        scale_sources.append("provisional")
+        warnings.append(
+            "Геометрия не извлечена; показан условный контур. Укажите контрольный отрезок."
+        )
 
     mean_conf = sum(confidences) / max(len(confidences), 1)
-    needs_scale = (not ocr_hit) and mean_conf < 0.5
+    # Prefer strongest sheet source for summary
+    priority = {"ocr_chain": 3, "ocr_bbox_weak": 2, "provisional": 1, "default": 0}
+    scale_source = max(scale_sources, key=lambda s: priority.get(s, 0)) if scale_sources else "provisional"
+    # Ask for control length unless chain OCR is confident
+    needs_scale = mean_conf < 0.55 or scale_source in {"provisional", "default", "ocr_bbox_weak"}
+    if needs_scale and not warnings:
+        if scale_source == "ocr_bbox_weak":
+            warnings.append(
+                "OCR нашёл размеры, но не привязал их к цепочкам — масштаб приблизительный. "
+                "Укажите контрольный отрезок в мм."
+            )
+        elif mean_conf < 0.55:
+            warnings.append(
+                "Низкая уверенность масштаба. Укажите контрольный отрезок в мм."
+            )
+
     return {
         "mode": ai_mode,
         "walls": walls,
@@ -555,7 +628,9 @@ def _extract_stub(
         "units": "mm",
         "source_count": len(cleaned_images),
         "scale_confidence": round(mean_conf, 3),
-        "scale_source": "ocr" if ocr_hit else "default",
+        "scale_source": scale_source,
+        "scale_warning": warnings[0] if warnings else None,
         "ocr_values": ocr_values[:12],
+        "closedness": closedness_reports[0] if closedness_reports else None,
         "needs_scale": needs_scale,
     }

@@ -21,7 +21,8 @@ services:
       - ./app:/app/app:ro
       - ./data/uploads:/app/data/uploads
       - ./data/results:/app/data/results
-      - ./models:/app/models
+      # Host models/ overrides image weights when present (run scripts/download_models.py)
+      - ./models:/app/models:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]

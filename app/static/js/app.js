@@ -159,10 +159,10 @@
           clearInterval(state.pollTimer);
           if (data.needs_scale) {
             scaleHint?.classList.add("is-warn");
-            setStatus(
-              "Готово. DXF готов (AutoCAD / LibreCAD). Размеры на листе не прочитались — можно (необязательно) указать контрольный отрезок в мм и запустить снова.",
-              "warn",
-            );
+            const warn =
+              data.scale_warning ||
+              "Масштаб ненадёжен. Укажите контрольный отрезок в мм и запустите снова — без этого условные 12 000 мм не считать верными.";
+            setStatus(`Готово. DXF готов. ${warn}`, "warn");
           } else {
             scaleHint?.classList.remove("is-warn");
             setStatus("Готово. DXF готов — откройте в AutoCAD или LibreCAD.", "ok");

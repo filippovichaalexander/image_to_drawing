@@ -26,6 +26,7 @@ class Job:
     step: str = "В очереди"
     error: str | None = None
     needs_scale: bool = False
+    scale_warning: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     drawing_paths: list[Path] = field(default_factory=list)
     photo_paths: list[Path] = field(default_factory=list)
@@ -43,6 +44,7 @@ class Job:
             "step": self.step,
             "error": self.error,
             "needs_scale": self.needs_scale,
+            "scale_warning": self.scale_warning,
             "has_result": self.result_path is not None and self.result_path.exists(),
             "has_dxf": self.dxf_path is not None and self.dxf_path.exists(),
             "format": "dxf",

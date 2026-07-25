@@ -46,9 +46,11 @@ def run_pipeline(job_id: str) -> None:
             ai_mode=settings.ai_mode,
             source_images=sheet_paths,
         )
+        needs_scale = bool(geometry.get("needs_scale")) and not job.metadata.get("scale_mm")
         jobs.update(
             job_id,
-            needs_scale=bool(geometry.get("needs_scale")) and not job.metadata.get("scale_mm"),
+            needs_scale=needs_scale,
+            scale_warning=geometry.get("scale_warning") if needs_scale else None,
         )
 
         scale_mm = job.metadata.get("scale_mm")
@@ -81,8 +83,10 @@ def run_pipeline(job_id: str) -> None:
                             d["p2"] = [d["p2"][0] * factor, d["p2"][1] * factor]
                     geometry["scale_factor"] = factor
                     geometry["needs_scale"] = False
+                    geometry["scale_warning"] = None
+                    geometry["scale_source"] = "user"
                     geometry["scale_confidence"] = max(float(geometry.get("scale_confidence") or 0), 0.9)
-                    jobs.update(job_id, needs_scale=False)
+                    jobs.update(job_id, needs_scale=False, scale_warning=None)
             except (TypeError, ValueError):
                 pass
 
