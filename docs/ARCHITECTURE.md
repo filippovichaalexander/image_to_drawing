@@ -1,73 +1,114 @@
-# Analysis of TZ collisions & optimization notes
-# (tracked for project decisions; Russian)
+# Architecture notes (TZ collisions & decisions)
+
+Status labels:
+- **Resolved now** — decision shipped in the current app; no action needed.
+- **Future** — still open or deferred; see [`TODO.md`](./TODO.md).
+
+---
 
 ## Коллизии ТЗ
 
-1. **Легковесность vs тяжёлый ИИ-стек**
-   ControlNet + SAM + YOLOv8 + PaddleOCR + PyTorch + Meshroom противоречат
-   «легковесному» Docker-образу и быстрому cold start. Решение: `AI_MODE=stub|full`,
-   MVP на OpenCV; тяжёлые модели — отдельный профиль / GPU-воркер.
+### 1. Lightweight Docker vs heavy AI stack — **Resolved now**
 
-2. **15–20 с на пакет (3 чертежа + 2 фото)**
-   Полный пайплайн с ControlNet на CPU нереалистичен. Нужен GPU и/или
-   замена denoising на классические фильтры OpenCV + лёгкие ONNX-модели.
+| ТЗ asked for | What we ship |
+|--------------|--------------|
+| ControlNet + SAM + Meshroom + full PyTorch always on | Optional profile |
 
-3. **DWG vs DXF**
-   `ezdxf` пишет DXF. DWG-конвертация (LibreDWG/ODA) **убрана** из продукта —
-   DXF открывается в AutoCAD / LibreCAD без тяжёлой сборки образа.
+**Decision (done):** `AI_MODE=stub|full` + `INSTALL_FULL_AI` for Docker.
+- `stub` — OpenCV + RapidOCR, light image.
+- `full` — YOLOv8-seg + PaddleOCR/RapidOCR; ControlNet/SAM/Meshroom **not** in the image.
+- Model 2 photo align = **ORB now**; C3Po (~10 GB) only if you opt in later ([`TODO.md`](./TODO.md)).
 
-4. **FastHTML «без Node» vs WebGL-просмотрщик**
-   PixiJS / dxf-viewer — JS с CDN. Node-сборка не нужна; конфликт мнимый.
+**Still future:** thinner ONNX-only image; GPU worker for heavy jobs.
 
-5. **Meshroom API**
-   Тяжёлый, не Python-native, плохо стыкуется с 15–20 с SLA.
-   MVP: OpenCV Perspective Transform; Meshroom — post-MVP.
+---
 
-6. **Публичные облачные AI API**
-   ТЗ описывает локальный Python CV-стек, не SaaS.
-   Публичные API (OpenAI Vision и т.п.) **не обязательны** и ухудшают
-   предсказуемость ГОСТ-конвейера / privacy сканов. Допустимы только как
-   опциональный эксперимент вне основного пайплайна.
+### 2. 15–20 s SLA (3 drawings + 2 photos) — **Partially resolved / Future**
 
-## Оптимизации на перспективу
+| Now | Future |
+|-----|--------|
+| Downscale ≤1600/1280, OpenCV denoise, lazy YOLO/OCR imports, PDF page cap | Process-pool for multi-sheet; ROI-OCR; avoid loading C3Po on CPU in the hot path |
 
-- Бинаризация/очистка: OpenCV → опционально лёгкий ONNX denoise
-- Сегментация стен: YOLOv8n-seg или MobileSAM вместо тяжёлого SAM
-- OCR: PaddleOCR mobile / только ROI вокруг размерных линий
-- Кэш моделей в volume; warm worker
-- Параллельная обработка листов (asyncio + process pool)
-- CDN для dxf-viewer; критический CSS inline
+ControlNet-on-CPU is **out of scope** (was never shipped). Meeting hard 15–20 s on CPU with `AI_MODE=full` is still not guaranteed — treat as a **Future** perf goal, not a current regression.
 
-## Реализовано (v0.3)
+---
 
-- WebGL-просмотр с переключением слоёв
-- OpenCV perspective для фото + эвристика окон на фасаде
-- DXF через ezdxf (основной формат выдачи)
-- ZIP-пакет DXF + README (опционально)
-- `AI_MODE=full` интерфейс (YOLO+OCR) с fallback на stub
-- Full AI модули: `preprocess` → `segmentation` → `ocr` (Paddle) → `scale` → `postprocess`
-- Веса: `models/floorplan-seg.pt` (доменные; `scripts/download_models.py` тянет HF) или bootstrap `walls_seg.pt`
-- `models/` в `.gitignore` — положите свой `.pt` локально; приложение подхватит автоматически
-- CVC-FP / WAFFLE — датасеты для обучения, не inference API
-- PDF → PNG через pypdfium2 (до 3 стр./файл, 150 DPI)
-- Stub-геометрия: structural grid + hatch suppression
-- Контрольный отрезок (мм) в UI; `needs_scale` по confidence
-- Масштаб: OCR → привязка к длине цепочки/стены (не только bbox); при низкой confidence — предупреждение, без «тихого» 12 000 мм
-- Пост-обработка контуров: сглаживание шипов, замыкание разрывов, отчёт `closedness`
-- Кросс-валидация: голосование модулей + унификация осей + перенос высот
-- Штамп Формы 3 (плотная сетка) + portrait fallback
+### 3. DWG vs DXF — **Resolved now**
 
-## Паттерны лёгкости / скорости
+ТЗ said DWG. Product delivers **DXF only** (`ezdxf`). LibreDWG/ODA removed.
+DXF opens in AutoCAD / LibreCAD. No further work unless a customer mandates native DWG.
 
-1. **Stub-first / DXF-only:** без компиляции LibreDWG в Docker.
-2. **Downscale-then-scale:** CV на ≤1600/1280 px.
-3. **PDF cap:** первые N страниц @ 150 DPI.
-4. **Lazy imports:** YOLO/OCR только в нужной стадии.
-5. **R2000 DXF:** широкая совместимость CAD-клиентов.
+---
 
-## Следующие шаги (качество, не «вес»)
+### 4. «No Node» UI vs WebGL viewer — **Resolved now** (was never a real conflict)
 
-- ONNX nano denoise / wall-seg вместо полного PyTorch в образе
-- ROI-OCR только вокруг размерных цепочек
-- Параллель листов через process pool при ≥2 CPU
-- Дообучение `walls_seg.pt` на обмерных листах
+FastAPI + Jinja2; viewer JS from CDN. No Node build. Keep as-is.
+
+---
+
+### 5. Meshroom API for photos — **Resolved now (MVP) / Future (optional)**
+
+| Now | Future |
+|-----|--------|
+| OpenCV perspective + facade cues + **ORB** photo↔plan | Meshroom / full SfM only if ORB+C3Po still insufficient ([`TODO.md`](./TODO.md) — low priority vs C3Po) |
+
+Meshroom stays **out** of the default pipeline.
+
+---
+
+### 6. Public cloud AI APIs — **Resolved now**
+
+Stack is local CV (OpenCV / YOLO / OCR). No OpenAI Vision (etc.) in the main path.
+Cloud APIs remain an optional experiment only — **not planned** for ГОСТ core.
+
+---
+
+## Оптимизации
+
+### Already applied (now)
+
+- Stub-first / DXF-only Docker (no LibreDWG)
+- Downscale-then-scale (CV ≤1600 / photos ≤1280)
+- PDF: first N pages @ 150 DPI
+- Lazy imports for YOLO/OCR
+- R2000 DXF for broad CAD compatibility
+- Layered Model 1 (floorplan YOLO) vs Model 2 (ORB; C3Po later)
+- OCR scale from dimension chains; no silent 12 000 mm
+- Contour post-process + `closedness` report
+
+### Future (see [`TODO.md`](./TODO.md))
+
+- **High impact:** C3Po photo↔plan (`download_models.py --c3 --confirm-large`)
+- Fine-tune `floorplan-seg.pt` on CVC-FP + R2V (+ CubiCasa walls/doors/windows only)
+- Full C3Po forward pass (not checkpoint + ORB hybrid)
+- ROI-OCR around dimension chains
+- ONNX nano denoise / wall-seg for lighter images
+- Parallel sheets (process pool) when ≥2 CPUs
+
+---
+
+## Реализовано (v0.3+)
+
+- WebGL viewer with layer toggles
+- OpenCV perspective + facade window cues + ORB validation
+- DXF via ezdxf; optional ZIP package
+- `AI_MODE=full` → YOLO+OCR with stub fallback
+- Pipeline: `preprocess` → `segmentation` → `ocr` → `scale` → `postprocess` → (`photogrammetry` + `fusion` if photos)
+- Weights: `models/floorplan-seg.pt` (HF Archivision / your fine-tune); `models/` gitignored
+- Datasets scaffold: `scripts/download_datasets.py` (CVC-FP / R2V / CubiCasa / C3 meta)
+- PDF via pypdfium2
+- Stub ortho walls + hatch suppression
+- Control length UI; `needs_scale` + `scale_warning`
+- Cross-validation (module voting, axes, elevations)
+- GOST Form 3 stamp (+ portrait fallback)
+
+---
+
+## Паттерны лёгкости / скорости (current policy)
+
+1. **Stub-first / DXF-only** — no LibreDWG in Docker.
+2. **Downscale-then-scale** — CV on ≤1600/1280 px.
+3. **PDF cap** — first N pages @ 150 DPI.
+4. **Lazy imports** — YOLO/OCR only when needed.
+5. **R2000 DXF** — wide CAD client support.
+6. **ORB before C3Po** — ship photo workflow without a 10 GB dependency.

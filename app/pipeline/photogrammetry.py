@@ -140,7 +140,14 @@ def enrich_from_photos(
     photo_paths: list[Path],
     ai_mode: str = "stub",
     results_dir: Path | None = None,
+    plan_path: Path | None = None,
 ) -> dict[str, Any]:
+    """
+    Photo branch of the layered stack (separate from YOLO floor-plan parsing).
+
+    1) OpenCV perspective rectify + facade window cues
+    2) OpenCV ORB photo↔plan aligner validates openings (Model 2 default)
+    """
     geometry = dict(geometry)
     rect_dir = (results_dir or Path("/tmp/itd_photos")) / "photos_rectified"
     rect_dir.mkdir(parents=True, exist_ok=True)
@@ -164,7 +171,6 @@ def enrich_from_photos(
     min_x, max_x = min(xs), max(xs)
     min_y, max_y = min(ys), max(ys)
     span_x = max(max_x - min_x, 1.0)
-    # Place facade openings along the southern (min_y) wall as plan symbols
     wall_y = min_y
     depth = max(span_x * 0.02, 200.0)
 
@@ -175,6 +181,7 @@ def enrich_from_photos(
         openings.append(
             {
                 "type": cue.get("type", "window"),
+                "kind": "window",
                 "p1": [cx - half_w, wall_y - depth],
                 "p2": [cx + half_w, wall_y + depth],
                 "from": "photogrammetry",
@@ -198,6 +205,15 @@ def enrich_from_photos(
         "mode": ai_mode,
         "reports": reports,
         "openings_added": added,
-        "note": "OpenCV Perspective Transform + adaptive window cues; Meshroom — post-MVP",
+        "note": "OpenCV perspective + facade cues; ORB aligner validates openings",
     }
-    return geometry
+
+    # Model 2 — ORB photo↔plan (C3Po ignored unless USE_C3_ALIGN=1)
+    from app.pipeline.fusion import fuse_geometry_with_photos
+
+    return fuse_geometry_with_photos(
+        geometry,
+        photo_paths,
+        plan_path=plan_path,
+        ai_mode=ai_mode,
+    )

@@ -10,8 +10,8 @@
 | UI + API | FastAPI + Jinja2 (без React/Node) |
 | Просмотр | WebGL (слои, зум, панорама) |
 | Очистка сканов | OpenCV; ControlNet — позже |
-| Геометрия / OCR | `AI_MODE=stub` или `full` (YOLOv8-seg + PaddleOCR) |
-| Фото | OpenCV Perspective Transform |
+| Геометрия / OCR | `AI_MODE=stub` или `full` (YOLOv8-seg Model 1 + PaddleOCR) |
+| Фото | OpenCV perspective + **ORB** photo↔plan (C3Po optional later) |
 | CAD | ezdxf → **DXF** (слои, размеры, рамка/штамп ГОСТ) |
 | PDF | pypdfium2 → PNG |
 | Runtime | Docker Compose (без LibreDWG) |
@@ -28,10 +28,15 @@ docker compose up --build
 
 См. `.env.example`.
 
-- `AI_MODE=stub|full` — full: YOLO + PaddleOCR (`requirements-full.txt` + `models/walls_seg.pt`)
+- `AI_MODE=stub|full` — full: YOLO + PaddleOCR (`requirements-full.txt` + `models/floorplan-seg.pt`)
 - `INSTALL_FULL_AI=1` — полный AI-стек при сборке образа
 
-Веса: `python scripts/download_models.py` (или при сборке Docker).
+Веса:
+```bash
+python scripts/download_models.py          # Model 1 floorplan-seg
+# Photo alignment uses OpenCV ORB by default (no download).
+# Optional later: python scripts/download_models.py --c3 --confirm-large  # ~10 GB C3Po
+```
 
 Скачивание: кнопка **Скачать DXF** (`/api/jobs/{id}/download`). Опционально ZIP: `/api/jobs/{id}/package`.
 
@@ -39,3 +44,4 @@ docker compose up --build
 
 - ТЗ: [`main-instruction.md`](./main-instruction.md)
 - Архитектура: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)
+- Future TODO (C3Po upgrade): [`docs/TODO.md`](./docs/TODO.md)

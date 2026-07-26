@@ -90,15 +90,17 @@ def run_pipeline(job_id: str) -> None:
             except (TypeError, ValueError):
                 pass
 
-        jobs.update(job_id, progress=48, step="Фотограмметрия…")
+        jobs.update(job_id, progress=48, step="Фотограмметрия / ORB alignment…")
         if job.photo_paths:
             from app.pipeline.photogrammetry import enrich_from_photos
 
+            plan_ref = sheet_paths[0] if sheet_paths else None
             geometry = enrich_from_photos(
                 geometry,
                 job.photo_paths,
                 ai_mode=settings.ai_mode,
                 results_dir=out_root,
+                plan_path=plan_ref,
             )
 
         jobs.update(job_id, progress=62, step="Кросс-валидация размеров…")

@@ -31,6 +31,12 @@ models/
 *.pt
 *.onnx
 *.paddle*
+*.pth
+
+# Training datasets (large) — keep README via exception
+datasets/*
+!datasets/README.md
+!datasets/.gitkeep
 
 # Env
 .env

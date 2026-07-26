@@ -24,7 +24,7 @@ def extract_geometry(
     `cleaned_images` — binary denoise outputs (stub vectorization).
     `source_images` — original rasters for YOLO/OCR (preferred; cleaned kills text).
 
-    AI_MODE=full: YOLO-seg + PaddleOCR pipeline (ML-instructions), stub fallback.
+    AI_MODE=full: Model 1 YOLO floorplan-seg + OCR; photos use Model 2 ORB (C3Po later).
     AI_MODE=stub: OpenCV Hough / ortho walls + RapidOCR chains.
     """
     sources = list(source_images or cleaned_images)

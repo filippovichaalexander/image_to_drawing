@@ -43,6 +43,12 @@ def resolve_seg_weights() -> Path:
 
 
 @lru_cache(maxsize=1)
+def get_floorplan_model():
+    """Model 1 — floor-plan parser (CVC-FP + R2V + CubiCasa walls target)."""
+    return load_model()
+
+
+@lru_cache(maxsize=1)
 def load_model():
     from ultralytics import YOLO  # type: ignore
 
