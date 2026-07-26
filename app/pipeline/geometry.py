@@ -21,25 +21,22 @@ def extract_geometry(
     source_images: list[Path] | None = None,
 ) -> dict[str, Any]:
     """
-    `cleaned_images` — binary denoise outputs (vectorization).
-    `source_images` — original rasters for OCR (preferred; cleaned kills text).
+    `cleaned_images` — binary denoise outputs (stub vectorization).
+    `source_images` — original rasters for YOLO/OCR (preferred; cleaned kills text).
 
-    Primary path is OpenCV stub: OCR→dimension-chain scale, contour post-process,
-    closedness checks. YOLO (AI_MODE=full) is a fallback when stub finds no walls.
+    AI_MODE=full: YOLO-seg + PaddleOCR pipeline (ML-instructions), stub fallback.
+    AI_MODE=stub: OpenCV Hough / ortho walls + RapidOCR chains.
     """
-    stub = _extract_stub(cleaned_images, ai_mode=ai_mode, source_images=source_images)
-    if stub.get("walls") and any(len(w) >= 2 for w in stub["walls"]):
-        # Mark mode full if requested, but keep stub geometry/scale
-        if ai_mode == "full":
-            stub["mode"] = "full+stub"
-        return stub
-
+    sources = list(source_images or cleaned_images)
     if ai_mode == "full":
         try:
-            return _extract_full(cleaned_images)
+            full = _extract_full_ai(sources, cleaned_images=cleaned_images)
+            if full.get("walls"):
+                return full
+            logger.warning("Full AI produced no walls; falling back to stub")
         except Exception as exc:  # noqa: BLE001
-            logger.warning("AI_MODE=full failed (%s); using stub geometry", exc)
-    return stub
+            logger.warning("AI_MODE=full failed (%s); falling back to stub", exc)
+    return _extract_stub(cleaned_images, ai_mode=ai_mode, source_images=sources)
 
 
 def _read_gray(path: Path) -> np.ndarray | None:
@@ -57,81 +54,208 @@ def _downscale(img: np.ndarray) -> tuple[np.ndarray, float]:
     return small, 1.0 / factor
 
 
-def _extract_full(cleaned_images: list[Path]) -> dict[str, Any]:
-    from ultralytics import YOLO  # type: ignore
-    from paddleocr import PaddleOCR  # type: ignore
+def _px_to_mm_yup(x: float, y: float, h: float, sx: float, sy: float) -> list[float]:
+    """Image Y-down → CAD Y-up."""
+    return [float(x * sx), float((h - y) * sy)]
 
-    model_path = Path(__file__).resolve().parents[2] / "models" / "walls_seg.pt"
-    if not model_path.exists():
-        model_path = Path("yolov8n-seg.pt")
-        logger.warning(
-            "models/walls_seg.pt missing — using %s (run: python scripts/download_models.py)",
-            model_path,
-        )
 
-    model = YOLO(str(model_path))
-    ocr = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
+def _extract_full_ai(
+    source_images: list[Path],
+    cleaned_images: list[Path] | None = None,
+) -> dict[str, Any]:
+    """
+    Full flowchart from ML-instructions.txt:
+    preprocess → YOLO-seg → PaddleOCR → scale → postprocess → geometry dict.
+    """
+    from app.pipeline.ocr import extract_dimensions_and_axes
+    from app.pipeline.postprocess import (
+        postprocess_walls,
+        simplify_polygon,
+        wall_polygons_to_lines,
+    )
+    from app.pipeline.preprocess import prepare_for_inference
+    from app.pipeline.scale import calibrate_scale, provisional_scale
+    from app.pipeline.segmentation import segment_floorplan
+
+    if not source_images:
+        raise RuntimeError("No source images for full AI pipeline")
 
     walls: list[list[list[float]]] = []
+    partitions: list[list[list[float]]] = []
     openings: list[dict[str, Any]] = []
-    dimensions: list[dict[str, Any]] = []
     axes: list[dict[str, Any]] = []
+    dimensions: list[dict[str, Any]] = []
+    texts: list[dict[str, Any]] = []
     sheets: list[dict[str, Any]] = []
+    confidences: list[float] = []
+    warnings: list[str] = []
+    ocr_values: list[int] = []
+    scale_sources: list[str] = []
 
-    for sheet_idx, path in enumerate(cleaned_images):
-        results = model.predict(str(path), verbose=False)
-        h = w = 1
-        img = _read_gray(path)
-        if img is not None:
-            h, w = img.shape[:2]
-        scale_x, scale_y = DEFAULT_SPAN_MM / max(w, 1), (DEFAULT_SPAN_MM * 0.67) / max(h, 1)
+    for sheet_idx, src in enumerate(source_images):
+        # uploads/<job>/drawings/x.png → uploads/<job>/prep/
+        if src.parent.name in {"drawings", "cleaned"}:
+            prep_dir = src.parent.parent / "prep"
+        else:
+            prep_dir = src.parent / "prep"
+        prep = prepare_for_inference(src, prep_dir)
+
+        seg = segment_floorplan(prep["yolo_path"], prep["orig_h"], prep["orig_w"])
+        dims, axis_marks = extract_dimensions_and_axes(
+            prep["ocr_path"],
+            ocr_to_orig=float(prep["ocr_scale"]),
+        )
+
+        wall_px = [simplify_polygon(p) for p in seg["walls"]]
+        scale = calibrate_scale(dims, wall_px, prep["orig_w"], prep["orig_h"])
+        if scale is None:
+            scale = provisional_scale(prep["orig_w"], prep["orig_h"])
+            warnings.append(str(scale["warning"]))
+        elif scale.get("warning"):
+            warnings.append(str(scale["warning"]))
+
+        sx = float(scale["mm_per_px_x"])
+        sy = float(scale["mm_per_px_y"])
+        oh = float(prep["orig_h"])
+        confidences.append(float(scale["confidence"]))
+        scale_sources.append(str(scale["source"]))
+        ocr_values.extend(int(v) for v in (scale.get("ocr_values") or []))
 
         sheet_walls: list[list[list[float]]] = []
-        for r in results:
-            if r.masks is None:
+        for poly in wall_px:
+            pts = [_px_to_mm_yup(p[0], p[1], oh, sx, sy) for p in poly]
+            if len(pts) >= 3:
+                if abs(pts[0][0] - pts[-1][0]) > 1 or abs(pts[0][1] - pts[-1][1]) > 1:
+                    pts.append(list(pts[0]))
+                sheet_walls.append(pts)
+
+        # Centerlines as additional wall segments when masks are thick blobs
+        for line in wall_polygons_to_lines(
+            [[_px_to_mm_yup(p[0], p[1], oh, sx, sy) for p in poly] for poly in wall_px]
+        ):
+            sheet_walls.append([line["p1"], line["p2"]])
+
+        walls.extend(sheet_walls)
+
+        for door in seg.get("doors") or []:
+            openings.append(
+                {
+                    "kind": "door",
+                    "p1": _px_to_mm_yup(door["p1"][0], door["p1"][1], oh, sx, sy),
+                    "p2": _px_to_mm_yup(door["p2"][0], door["p2"][1], oh, sx, sy),
+                    "sheet": sheet_idx,
+                }
+            )
+        for win in seg.get("windows") or []:
+            openings.append(
+                {
+                    "kind": "window",
+                    "p1": _px_to_mm_yup(win["p1"][0], win["p1"][1], oh, sx, sy),
+                    "p2": _px_to_mm_yup(win["p2"][0], win["p2"][1], oh, sx, sy),
+                    "sheet": sheet_idx,
+                }
+            )
+
+        for mark in axis_marks:
+            cx, cy = _px_to_mm_yup(mark["cx"], mark["cy"], oh, sx, sy)
+            name = str(mark["name"])
+            if name.isdigit():
+                axes.append(
+                    {
+                        "name": name,
+                        "x": cx,
+                        "y0": cy - 1500,
+                        "y1": cy + 1500,
+                        "sheet": sheet_idx,
+                        "ocr": True,
+                    }
+                )
+            else:
+                axes.append(
+                    {
+                        "name": name,
+                        "y": cy,
+                        "x0": cx - 1500,
+                        "x1": cx + 1500,
+                        "sheet": sheet_idx,
+                        "ocr": True,
+                    }
+                )
+
+        for lab in dims[:40]:
+            if int(lab["value_mm"]) < 800:
                 continue
-            for poly in r.masks.xy:
-                pts = [[float(x * scale_x), float((h - y) * scale_y)] for x, y in poly]
-                if len(pts) >= 3:
-                    pts.append(pts[0])
-                    sheet_walls.append(pts)
-                    walls.append(pts)
+            pos = _px_to_mm_yup(lab["cx"], lab["cy"], oh, sx, sy)
+            texts.append(
+                {
+                    "text": str(lab["value_mm"]),
+                    "pos": pos,
+                    "height": max(120.0, min(prep["orig_w"], prep["orig_h"]) * sx * 0.02),
+                    "sheet": sheet_idx,
+                    "source": "ocr",
+                    "conf": lab.get("conf"),
+                }
+            )
+            dimensions.append(
+                {
+                    "p1": [pos[0] - float(lab["value_mm"]) / 2, pos[1]],
+                    "p2": [pos[0] + float(lab["value_mm"]) / 2, pos[1]],
+                    "value_mm": int(lab["value_mm"]),
+                    "sheet": sheet_idx,
+                    "source": scale["source"],
+                    "ocr": lab.get("text"),
+                }
+            )
 
-        ocr_result = ocr.ocr(str(path), cls=True)
-        for block in ocr_result or []:
-            for line in block or []:
-                box, (text, conf) = line
-                if conf < 0.5:
-                    continue
-                text = (text or "").strip()
-                digits = "".join(ch for ch in text if ch.isdigit())
-                if digits and len(digits) >= 3:
-                    xs = [p[0] for p in box]
-                    ys = [p[1] for p in box]
-                    cx = float(sum(xs) / len(xs) * scale_x)
-                    cy = float((h - sum(ys) / len(ys)) * scale_y)
-                    dimensions.append(
-                        {
-                            "p1": [cx - float(digits) / 2, cy],
-                            "p2": [cx + float(digits) / 2, cy],
-                            "value_mm": int(digits),
-                            "ocr": text,
-                            "sheet": sheet_idx,
-                        }
-                    )
-
-        sheets.append({"index": sheet_idx, "source": path.name, "wall_count": len(sheet_walls)})
+        sheets.append(
+            {
+                "index": sheet_idx,
+                "source": src.name,
+                "wall_count": len(sheet_walls),
+                "scale_source": scale["source"],
+                "ocr_values": [d["value_mm"] for d in dims[:8]],
+                "weights": seg.get("weights"),
+            }
+        )
 
     if not walls:
         raise RuntimeError("YOLO produced no wall masks")
 
-    from app.pipeline.postprocess import postprocess_walls
+    walls, partitions, closedness = postprocess_walls(walls, partitions)
 
-    walls, partitions, closedness = postprocess_walls(walls, [])
-    scale_warning = (
-        "Полный AI-режим: масштаб по умолчанию условный (12 000 мм). "
-        "Укажите контрольный отрезок в мм."
-    )
+    mean_conf = sum(confidences) / max(len(confidences), 1)
+    priority = {"ocr_chain": 3, "ocr_bbox_weak": 2, "ocr": 2, "provisional": 1, "default": 0}
+    scale_source = max(scale_sources, key=lambda s: priority.get(s, 0)) if scale_sources else "provisional"
+    needs_scale = mean_conf < 0.55 or scale_source in {"provisional", "default", "ocr_bbox_weak"}
+    if needs_scale and not warnings:
+        warnings.append(
+            "Низкая уверенность масштаба. Укажите контрольный отрезок в мм."
+        )
+
+    # Overall dims if OCR chains empty
+    if not dimensions and walls:
+        pts = [p for poly in walls for p in poly]
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        dimensions = [
+            {
+                "p1": [min(xs), min(ys) - 400],
+                "p2": [max(xs), min(ys) - 400],
+                "value_mm": int(round(max(xs) - min(xs))),
+                "sheet": 0,
+                "role": "overall_x",
+                "source": scale_source,
+            },
+            {
+                "p1": [min(xs) - 400, min(ys)],
+                "p2": [min(xs) - 400, max(ys)],
+                "value_mm": int(round(max(ys) - min(ys))),
+                "sheet": 0,
+                "role": "overall_y",
+                "source": scale_source,
+            },
+        ]
+
     return {
         "mode": "full",
         "walls": walls,
@@ -139,15 +263,22 @@ def _extract_full(cleaned_images: list[Path]) -> dict[str, Any]:
         "openings": openings,
         "axes": axes,
         "dimensions": dimensions,
+        "texts": texts,
         "sheets": sheets,
         "units": "mm",
-        "source_count": len(cleaned_images),
-        "scale_confidence": 0.35,
-        "scale_source": "provisional",
-        "scale_warning": scale_warning,
+        "source_count": len(source_images),
+        "scale_confidence": round(mean_conf, 3),
+        "scale_source": scale_source,
+        "scale_warning": warnings[0] if warnings else None,
+        "ocr_values": ocr_values[:12],
         "closedness": closedness,
-        "needs_scale": True,
+        "needs_scale": needs_scale,
     }
+
+
+def _extract_full(cleaned_images: list[Path]) -> dict[str, Any]:
+    """Backward-compatible alias — prefer originals via cleaned list."""
+    return _extract_full_ai(cleaned_images, cleaned_images=cleaned_images)
 
 
 def _merge_h(items: list[tuple[int, int, int]], tol: int = 5) -> list[tuple[int, int, int]]:

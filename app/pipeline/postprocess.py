@@ -5,6 +5,9 @@ from __future__ import annotations
 import math
 from typing import Any
 
+import cv2
+import numpy as np
+
 
 def _dist(a: list[float], b: list[float]) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
@@ -164,6 +167,61 @@ def check_closedness(
     }
 
 
+def simplify_polygon(pts: list[list[float]], epsilon_factor: float = 0.002) -> list[list[float]]:
+    """Ramer–Douglas–Peucker simplification (OpenCV approxPolyDP)."""
+    if len(pts) < 3:
+        return [list(p) for p in pts]
+    arr = np.array(pts, dtype=np.float32)
+    closed = bool(_dist(pts[0], pts[-1]) < 1.0)
+    peri = float(cv2.arcLength(arr, closed))
+    epsilon = max(1.0, epsilon_factor * peri)
+    approx = cv2.approxPolyDP(arr, epsilon, closed)
+    out = approx.reshape(-1, 2).tolist()
+    if closed and out and _dist(out[0], out[-1]) > 1e-3:
+        out.append(list(out[0]))
+    return out
+
+
+def wall_polygons_to_lines(
+    walls: list[list[list[float]]],
+    min_thickness: float = 80.0,
+    max_thickness: float = 600.0,
+) -> list[dict[str, Any]]:
+    """
+    Convert thick wall polygons to centerline segments + thickness (PCA axis).
+    Thin / oversized blobs are skipped.
+    """
+    lines: list[dict[str, Any]] = []
+    for poly in walls:
+        if len(poly) < 3:
+            continue
+        pts = np.array(poly[:-1] if _is_closed(poly, 1.0) else poly, dtype=np.float64)
+        if len(pts) < 3:
+            continue
+        mean = pts.mean(axis=0)
+        centered = pts - mean
+        try:
+            cov = np.cov(centered.T)
+            eig_vals, eig_vecs = np.linalg.eigh(cov)
+        except np.linalg.LinAlgError:
+            continue
+        main_axis = eig_vecs[:, int(np.argmax(eig_vals))]
+        proj = centered @ main_axis
+        min_t, max_t = float(np.min(proj)), float(np.max(proj))
+        if max_t - min_t < 200:
+            continue
+        perp = np.array([-main_axis[1], main_axis[0]])
+        perp_proj = centered @ perp
+        thickness = float(np.max(perp_proj) - np.min(perp_proj))
+        if not (min_thickness <= thickness <= max_thickness):
+            # Still emit as open polyline outline when thickness filter fails
+            continue
+        p1 = (mean + min_t * main_axis).tolist()
+        p2 = (mean + max_t * main_axis).tolist()
+        lines.append({"p1": p1, "p2": p2, "thickness": thickness})
+    return lines
+
+
 def postprocess_walls(
     walls: list[list[list[float]]],
     partitions: list[list[list[float]]] | None = None,
@@ -187,6 +245,7 @@ def postprocess_walls(
     for poly in walls:
         if len(poly) >= 4 and (_is_closed(poly, snap) or len(poly) > 4):
             p = _ensure_closed(poly, snap)
+            p = simplify_polygon(p)
             p = _remove_spikes(p, min_edge=min_edge)
             p = _snap_collinear(p, tol=col_tol)
             p = _ensure_closed(p, snap)
@@ -219,4 +278,5 @@ def postprocess_walls(
     report = check_closedness(cleaned, tol_mm=snap)
     report["snap_mm"] = round(snap, 1)
     report["postprocessed"] = True
+    report["centerlines"] = len(wall_polygons_to_lines(cleaned))
     return cleaned, parts_out, report

@@ -17,6 +17,8 @@ services:
       - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-50}
       - AI_MODE=${AI_MODE:-full}
       - YOLO_CONFIG_DIR=/app/.ultralytics
+      - HOME=/app/data
+      - PADDLEOCR_HOME=/app/data/.paddleocr
     volumes:
       - ./app:/app/app:ro
       - ./data/uploads:/app/data/uploads

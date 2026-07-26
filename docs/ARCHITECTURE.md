@@ -45,6 +45,10 @@
 - DXF через ezdxf (основной формат выдачи)
 - ZIP-пакет DXF + README (опционально)
 - `AI_MODE=full` интерфейс (YOLO+OCR) с fallback на stub
+- Full AI модули: `preprocess` → `segmentation` → `ocr` (Paddle) → `scale` → `postprocess`
+- Веса: `models/floorplan-seg.pt` (доменные; `scripts/download_models.py` тянет HF) или bootstrap `walls_seg.pt`
+- `models/` в `.gitignore` — положите свой `.pt` локально; приложение подхватит автоматически
+- CVC-FP / WAFFLE — датасеты для обучения, не inference API
 - PDF → PNG через pypdfium2 (до 3 стр./файл, 150 DPI)
 - Stub-геометрия: structural grid + hatch suppression
 - Контрольный отрезок (мм) в UI; `needs_scale` по confidence
