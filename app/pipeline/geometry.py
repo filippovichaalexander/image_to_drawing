@@ -24,19 +24,95 @@ def extract_geometry(
     `cleaned_images` — binary denoise outputs (stub vectorization).
     `source_images` — original rasters for YOLO/OCR (preferred; cleaned kills text).
 
-    AI_MODE=full: Model 1 YOLO floorplan-seg + OCR; photos use Model 2 ORB (C3Po later).
-    AI_MODE=stub: OpenCV Hough / ortho walls + RapidOCR chains.
+    AI_MODE=full: try YOLO-seg for walls/openings, but if YOLO is sparse
+    (typical on CAD scans with the bootstrap Archivision weights), keep
+    OpenCV stub walls — otherwise the viewer shows only an empty rectangle.
     """
     sources = list(source_images or cleaned_images)
-    if ai_mode == "full":
-        try:
-            full = _extract_full_ai(sources, cleaned_images=cleaned_images)
-            if full.get("walls"):
-                return full
-            logger.warning("Full AI produced no walls; falling back to stub")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("AI_MODE=full failed (%s); falling back to stub", exc)
-    return _extract_stub(cleaned_images, ai_mode=ai_mode, source_images=sources)
+    stub = _extract_stub(cleaned_images, ai_mode=ai_mode, source_images=sources)
+
+    if ai_mode != "full":
+        return stub
+
+    try:
+        full = _extract_full_ai(sources, cleaned_images=cleaned_images)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("AI_MODE=full failed (%s); using OpenCV stub geometry", exc)
+        stub["mode"] = "stub"
+        stub["yolo_note"] = f"yolo_failed:{exc}"
+        return stub
+
+    return _merge_yolo_with_stub(full, stub)
+
+
+def _wall_segment_count(geometry: dict[str, Any]) -> int:
+    """Count wall polylines (closed outer counts as 1; each internal segment too)."""
+    n = 0
+    for poly in geometry.get("walls") or []:
+        if len(poly) >= 2:
+            n += 1
+    for poly in geometry.get("partitions") or []:
+        if len(poly) >= 2:
+            n += 1
+    return n
+
+
+def _is_sparse_yolo(geometry: dict[str, Any]) -> bool:
+    """True when YOLO only returned an outer box / almost no structure."""
+    walls = geometry.get("walls") or []
+    openings = geometry.get("openings") or []
+    segs = _wall_segment_count(geometry)
+    # One closed rect (± duplicate sheets) and no doors/windows → useless for plans
+    if segs <= 2 and not openings:
+        return True
+    if len(walls) <= 2 and all(len(w) <= 5 for w in walls) and not openings:
+        return True
+    return False
+
+
+def _merge_yolo_with_stub(full: dict[str, Any], stub: dict[str, Any]) -> dict[str, Any]:
+    """Prefer rich OpenCV walls when YOLO is sparse; keep YOLO openings + best OCR."""
+    if not full.get("walls") and stub.get("walls"):
+        out = dict(stub)
+        out["mode"] = "full+stub"
+        out["yolo_note"] = "yolo_empty"
+        return out
+
+    if _is_sparse_yolo(full) and _wall_segment_count(stub) > _wall_segment_count(full):
+        logger.warning(
+            "YOLO geometry sparse (%s segs); using OpenCV stub walls (%s segs)",
+            _wall_segment_count(full),
+            _wall_segment_count(stub),
+        )
+        out = dict(stub)
+        out["mode"] = "full+stub"
+        out["yolo_note"] = "yolo_sparse_used_opencv_walls"
+        # Merge any YOLO openings / texts not already present
+        stub_texts = list(out.get("texts") or [])
+        seen = {t.get("text") for t in stub_texts}
+        for t in full.get("texts") or []:
+            if t.get("text") not in seen:
+                stub_texts.append(t)
+        out["texts"] = stub_texts
+        if full.get("openings"):
+            out["openings"] = list(out.get("openings") or []) + list(full["openings"])
+        # Prefer OCR-chain scale from either side
+        if (full.get("scale_confidence") or 0) > (stub.get("scale_confidence") or 0):
+            for key in (
+                "scale_confidence",
+                "scale_source",
+                "scale_warning",
+                "needs_scale",
+                "ocr_values",
+            ):
+                if key in full:
+                    out[key] = full[key]
+        out["sheets"] = full.get("sheets") or stub.get("sheets")
+        return out
+
+    full = dict(full)
+    full.setdefault("mode", "full")
+    return full
 
 
 def _read_gray(path: Path) -> np.ndarray | None:

@@ -26,9 +26,11 @@ ROOT = Path(__file__).resolve().parents[1]
 DATASETS = ROOT / "datasets"
 
 # Official / community entry points (URLs change — README has fallbacks)
-CVC_FP_PAGE = "http://dag.cvc.uab.es/resources/"
+CVC_FP_PAGE = "http://dag.cvc.uab.es/dataset/cvc-fp-database-for-structural-floor-plan-analysis/"
+CVC_FP_ZIP = "http://dag.cvc.uab.es/DATASETS/CVC-FP.zip"
 R2V_GIT = "https://github.com/art-programmer/FloorplanTransformation.git"
 CUBICASA_PAGE = "https://github.com/CubiCasa/CubiCasa5k"
+CUBICASA_ZIP = "https://zenodo.org/records/2613548/files/cubicasa5k.zip?download=1"
 C3_HF = "https://huggingface.co/datasets/kwhuang/C3"
 C3_PROJECT = "https://c3po-correspondence.github.io/"
 C3PO_GIT = "https://github.com/c3po-correspondence/C3Po.git"
@@ -59,7 +61,9 @@ C3 is cross-view correspondence data. Mixing it into segmentation confuses the w
 
 ```bash
 python scripts/download_datasets.py --cvc-fp --r2v --c3-meta
-python scripts/download_models.py --c3   # C3Po.pth → models/
+python scripts/prepare_yolo_dataset.py --clean   # CVC-FP SVG + R2V synthetic → YOLO-seg
+python scripts/train_floorplan_seg.py            # → models/floorplan-seg.pt
+python scripts/download_models.py --c3           # C3Po.pth → models/ (optional Model 2)
 ```
 """
     (DATASETS / "README.md").write_text(text, encoding="utf-8")
@@ -67,22 +71,60 @@ python scripts/download_models.py --c3   # C3Po.pth → models/
 
 
 def fetch_cvc_fp() -> int:
+    """Download + extract official CVC-FP (~27 MB) into datasets/cvc_fp/ImagesGT."""
+    import shutil
+    import zipfile
+
     dest = DATASETS / "cvc_fp"
     dest.mkdir(parents=True, exist_ok=True)
+    images = dest / "ImagesGT"
     meta = {
         "name": "CVC-FP",
         "role": "model1_floorplan_seg",
         "page": CVC_FP_PAGE,
-        "status": "manual_or_mirror",
-        "note": (
-            "Official CVC host has moved historically. Place extracted images/labels here. "
-            "Roboflow mirrors: search 'CVC-FP floorplans'."
-        ),
+        "zip": CVC_FP_ZIP,
+        "status": "downloaded" if images.is_dir() and any(images.glob("*.png")) else "pending",
+        "note": "PNG + SVG GT (walls/doors/windows). Convert via scripts/prepare_yolo_dataset.py",
     }
+    if images.is_dir() and len(list(images.glob("*.png"))) > 50:
+        meta["status"] = "present"
+        (dest / "SOURCE.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        print(f"CVC-FP already present → {images} ({len(list(images.glob('*.png')))} PNGs)")
+        return 0
+
+    zip_path = dest / "CVC-FP.zip"
+    print(f"Downloading CVC-FP from {CVC_FP_ZIP} …")
+    try:
+        urllib.request.urlretrieve(CVC_FP_ZIP, zip_path)
+    except Exception as exc:  # noqa: BLE001
+        meta["status"] = "download_failed"
+        meta["error"] = str(exc)
+        (dest / "SOURCE.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        print(f"CVC-FP download failed ({exc}). Manual: {CVC_FP_ZIP}", file=sys.stderr)
+        return 1
+
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(dest)
+    except zipfile.BadZipFile as exc:
+        print(f"Bad zip: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        zip_path.unlink(missing_ok=True)
+
+    # Normalize layout if zip nested oddly
+    if not images.is_dir():
+        nested = next(dest.rglob("ImagesGT"), None)
+        if nested and nested.is_dir() and nested != images:
+            shutil.move(str(nested), str(images))
+
+    n = len(list(images.glob("*.png"))) if images.is_dir() else 0
+    meta["status"] = "downloaded" if n else "empty"
+    meta["png_count"] = n
     (dest / "SOURCE.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    print(f"CVC-FP scaffold → {dest} (download images into this folder)")
-    print(f"  Index: {CVC_FP_PAGE}")
-    return 0
+    print(f"CVC-FP → {dest} ({n} PNGs)")
+    print("Next: python scripts/prepare_yolo_dataset.py && python scripts/train_floorplan_seg.py")
+    return 0 if n else 1
 
 
 def fetch_r2v() -> int:
@@ -106,7 +148,18 @@ def fetch_r2v() -> int:
         print(f"Clone failed ({exc}). Clone manually: git clone {R2V_GIT}", file=sys.stderr)
         return 1
     (dest / "SOURCE.json").write_text(
-        json.dumps({"git": R2V_GIT, "role": "model1_floorplan_seg"}, indent=2),
+        json.dumps(
+            {
+                "git": R2V_GIT,
+                "role": "model1_floorplan_seg",
+                "note": (
+                    "LIFULL rasters are not redistributable. "
+                    "scripts/prepare_yolo_dataset.py synthesizes RGB + YOLO labels "
+                    "from data/floorplan_representation/*.txt"
+                ),
+            },
+            indent=2,
+        ),
         encoding="utf-8",
     )
     return 0

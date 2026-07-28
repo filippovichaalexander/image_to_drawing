@@ -19,6 +19,7 @@ services:
       - YOLO_CONFIG_DIR=/app/.ultralytics
       - HOME=/app/data
       - PADDLEOCR_HOME=/app/data/.paddleocr
+      - MPLCONFIGDIR=/app/data/.matplotlib
     volumes:
       - ./app:/app/app:ro
       - ./data/uploads:/app/data/uploads

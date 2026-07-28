@@ -79,7 +79,7 @@ Cloud APIs remain an optional experiment only — **not planned** for ГОСТ c
 ### Future (see [`TODO.md`](./TODO.md))
 
 - **High impact:** C3Po photo↔plan (`download_models.py --c3 --confirm-large`)
-- Fine-tune `floorplan-seg.pt` on CVC-FP + R2V (+ CubiCasa walls/doors/windows only)
+- Fine-tune `floorplan-seg.pt`: `prepare_yolo_dataset.py` + `train_floorplan_seg.py` (CVC-FP + R2V synthetic)
 - Full C3Po forward pass (not checkpoint + ORB hybrid)
 - ROI-OCR around dimension chains
 - ONNX nano denoise / wall-seg for lighter images
@@ -94,8 +94,8 @@ Cloud APIs remain an optional experiment only — **not planned** for ГОСТ c
 - DXF via ezdxf; optional ZIP package
 - `AI_MODE=full` → YOLO+OCR with stub fallback
 - Pipeline: `preprocess` → `segmentation` → `ocr` → `scale` → `postprocess` → (`photogrammetry` + `fusion` if photos)
-- Weights: `models/floorplan-seg.pt` (HF Archivision / your fine-tune); `models/` gitignored
-- Datasets scaffold: `scripts/download_datasets.py` (CVC-FP / R2V / CubiCasa / C3 meta)
+- Weights: `models/floorplan-seg.pt` (CVC-FP+R2V fine-tune preferred; else HF Archivision)
+- Datasets: `scripts/download_datasets.py` + `prepare_yolo_dataset.py` → `datasets/combined/`
 - PDF via pypdfium2
 - Stub ortho walls + hatch suppression
 - Control length UI; `needs_scale` + `scale_warning`

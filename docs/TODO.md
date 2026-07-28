@@ -43,8 +43,22 @@ Related: `ML-instructions-approaches.txt`, `datasets/c3/`, `models/C3_DOWNLOAD.t
 
 ## Other quality TODOs
 
-- [ ] Fine-tune `models/floorplan-seg.pt` on CVC-FP + R2V (+ CubiCasa wall/door/window only)
+- [x] Download CVC-FP + convert with R2V synthetic → YOLO-seg (`scripts/prepare_yolo_dataset.py`)
+- [x] Fine-tune / install `models/floorplan-seg.pt` via `scripts/train_floorplan_seg.py` (CVC-FP+R2V; longer resume may still improve)
 - [ ] Wire full C3Po inference (not checkpoint+ORB hybrid) after weights land
 - [ ] ROI-OCR around dimension chains only
 - [ ] ONNX nano denoise / wall-seg for lighter Docker images
 - [ ] Parallel sheet processing (process pool) when ≥2 CPUs
+
+### Model 1 training (walls / doors / windows)
+
+```bash
+python scripts/download_datasets.py --cvc-fp --r2v
+python scripts/prepare_yolo_dataset.py --clean
+# Prefer GPU host or Colab; inside Docker (CPU):
+docker exec -e MPLCONFIGDIR=/tmp/mpl -e HOME=/tmp image_to_drawing_web \
+  python /app/scripts/train_floorplan_seg.py --epochs 40 --batch 4 --device cpu
+docker compose restart web
+```
+
+R2V does **not** ship LIFULL rasters; the prepare script renders vector annotations to synthetic plans for diversity. CubiCasa5K remains optional (walls/doors/windows only).

@@ -1,5 +1,6 @@
 # Optional heavy AI stack for AI_MODE=full
-# Torch CPU is installed separately in Dockerfile (see --index-url pytorch.org/whl/cpu)
+# Torch+torchvision CPU wheels are pinned in Dockerfile (same index) —
+# do not install mismatched torchvision from PyPI (breaks YOLO NMS).
 ultralytics>=8.3.0,<9
 paddlepaddle>=2.6.0,<3.0
 paddleocr>=2.8.0,<3

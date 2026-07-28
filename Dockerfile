@@ -26,10 +26,14 @@ COPY requirements.txt requirements-full.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 ARG INSTALL_FULL_AI=1
+# Pin matching CPU wheels AFTER ultralytics — it often upgrades torch and leaves a
+# mismatched PyPI torchvision that breaks YOLO (torchvision::nms missing).
 RUN if [ "$INSTALL_FULL_AI" = "1" ]; then \
-      pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
-      && pip install --no-cache-dir -r requirements-full.txt \
-      && python -c "import torch, ultralytics, paddleocr; print('AI ok', torch.__version__)"; \
+      pip install --no-cache-dir -r requirements-full.txt \
+      && pip install --no-cache-dir --force-reinstall \
+        'torch==2.5.1+cpu' 'torchvision==0.20.1+cpu' \
+        --index-url https://download.pytorch.org/whl/cpu \
+      && python -c "import torch, torchvision, ultralytics; from torchvision.ops import nms; import paddleocr; print('AI ok', torch.__version__, torchvision.__version__)"; \
     fi
 
 COPY app ./app

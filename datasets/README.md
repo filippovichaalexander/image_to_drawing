@@ -21,5 +21,7 @@ C3 is cross-view correspondence data. Mixing it into segmentation confuses the w
 
 ```bash
 python scripts/download_datasets.py --cvc-fp --r2v --c3-meta
-python scripts/download_models.py --c3   # C3Po.pth → models/
+python scripts/prepare_yolo_dataset.py --clean   # CVC-FP SVG + R2V synthetic → YOLO-seg
+python scripts/train_floorplan_seg.py            # → models/floorplan-seg.pt
+python scripts/download_models.py --c3           # C3Po.pth → models/ (optional Model 2)
 ```
