@@ -30,6 +30,8 @@ LAYER_NAMES = {
     "axes": "03_AXES",
     "dims": "04_DIMS_GOST",
     "openings": "05_OPENINGS",
+    "detail": "06_DETAIL",
+    "hatch": "07_HATCH",
 }
 
 LAYER_LABELS_RU = {
@@ -40,4 +42,6 @@ LAYER_LABELS_RU = {
     "03_AXES": "03_Оси",
     "04_DIMS_GOST": "04_Размеры",
     "05_OPENINGS": "05_Окна_Двери",
+    "06_DETAIL": "06_Детали",
+    "07_HATCH": "07_Штриховка",
 }

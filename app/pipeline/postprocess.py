@@ -13,6 +13,33 @@ def _dist(a: list[float], b: list[float]) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
+def _segment_length(poly: list[list[float]]) -> float:
+    if len(poly) < 2:
+        return 0.0
+    return sum(_dist(poly[i], poly[i + 1]) for i in range(len(poly) - 1))
+
+
+def _bbox(poly: list[list[float]]) -> tuple[float, float, float, float]:
+    xs = [p[0] for p in poly]
+    ys = [p[1] for p in poly]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _bbox_iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
+    ix0 = max(a[0], b[0])
+    iy0 = max(a[1], b[1])
+    ix1 = min(a[2], b[2])
+    iy1 = min(a[3], b[3])
+    iw = max(0.0, ix1 - ix0)
+    ih = max(0.0, iy1 - iy0)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(1.0, (a[2] - a[0]) * (a[3] - a[1]))
+    area_b = max(1.0, (b[2] - b[0]) * (b[3] - b[1]))
+    return inter / max(area_a + area_b - inter, 1.0)
+
+
 def _is_closed(poly: list[list[float]], tol: float) -> bool:
     if len(poly) < 3:
         return False
@@ -182,6 +209,174 @@ def simplify_polygon(pts: list[list[float]], epsilon_factor: float = 0.002) -> l
     return out
 
 
+def snap_to_orthogonal(poly: list[list[float]], tol_deg: float = 8.0) -> list[list[float]]:
+    """
+    Snap nearly-horizontal / nearly-vertical edges to exact H/V.
+    Removes jagged stair-step pixel contours on CAD plans (fix_3).
+    True diagonals (door leaves) are left unchanged.
+    """
+    if len(poly) < 2:
+        return [list(p) for p in poly]
+
+    closed = _dist(poly[0], poly[-1]) < 1e-3
+    pts = [list(p) for p in (poly[:-1] if closed else poly)]
+    if len(pts) < 2:
+        return [list(p) for p in poly]
+
+    out: list[list[float]] = [list(pts[0])]
+    for i in range(1, len(pts)):
+        x0, y0 = out[-1]
+        x1, y1 = pts[i]
+        dx, dy = x1 - x0, y1 - y0
+        length = math.hypot(dx, dy)
+        if length < 1e-6:
+            continue
+        ang = abs(math.degrees(math.atan2(dy, dx))) % 180.0
+        if ang > 90.0:
+            ang = 180.0 - ang
+        if ang <= tol_deg:
+            # horizontal
+            out.append([x1, y0])
+        elif abs(ang - 90.0) <= tol_deg:
+            # vertical
+            out.append([x0, y1])
+        else:
+            out.append([x1, y1])
+
+    if closed and out:
+        # Force last→first also ortho when possible
+        x0, y0 = out[-1]
+        x1, y1 = out[0]
+        dx, dy = x1 - x0, y1 - y0
+        length = math.hypot(dx, dy)
+        if length > 1e-6:
+            ang = abs(math.degrees(math.atan2(dy, dx))) % 180.0
+            if ang > 90.0:
+                ang = 180.0 - ang
+            if ang <= tol_deg:
+                out[-1] = [x0, y1] if abs(dy) < abs(dx) else [x0, y0]
+                out[0] = [x1, out[-1][1]]
+            elif abs(ang - 90.0) <= tol_deg:
+                out[-1] = [x1, y0]
+                out[0] = [out[-1][0], y1]
+        out.append(list(out[0]))
+    return out
+
+
+def peel_diagonal_door_leaves(
+    walls: list[list[list[float]]],
+    min_len: float = 200.0,
+    max_len: float = 1800.0,
+    diag_tol_deg: float = 18.0,
+) -> tuple[list[list[list[float]]], list[dict[str, Any]]]:
+    """
+    Move short diagonal wall segments (GOST door leaves) out of walls → openings.
+    Also drops residual short diagonal edges from longer polylines.
+    """
+    kept: list[list[list[float]]] = []
+    doors: list[dict[str, Any]] = []
+    for poly in walls:
+        if len(poly) == 2:
+            p1, p2 = poly[0], poly[1]
+            length = _dist(p1, p2)
+            dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+            ang = abs(math.degrees(math.atan2(dy, dx))) % 180.0
+            if ang > 90.0:
+                ang = 180.0 - ang
+            if min_len <= length <= max_len and abs(ang - 45.0) <= diag_tol_deg:
+                doors.append({"kind": "door", "leaf": [list(p1), list(p2)]})
+                continue
+            kept.append(poly)
+            continue
+
+        # Multi-point: keep only near-ortho edges; peel door-length diagonals
+        if len(poly) < 2:
+            continue
+        closed = _dist(poly[0], poly[-1]) < 1e-3
+        pts = poly[:-1] if closed else list(poly)
+        new_pts: list[list[float]] = [list(pts[0])]
+        for i in range(1, len(pts)):
+            a, b = new_pts[-1], pts[i]
+            length = _dist(a, b)
+            ang = abs(math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))) % 180.0
+            if ang > 90.0:
+                ang = 180.0 - ang
+            is_ortho = ang <= 12.0 or abs(ang - 90.0) <= 12.0
+            is_door = min_len <= length <= max_len and abs(ang - 45.0) <= diag_tol_deg
+            if is_door:
+                doors.append({"kind": "door", "leaf": [list(a), list(b)]})
+                # Flush current ortho chain; start a new one at the far hinge/leaf tip
+                if len(new_pts) >= 2:
+                    kept.append(new_pts)
+                new_pts = [list(b)]
+                continue
+            if is_ortho or length < min_len * 0.5:
+                new_pts.append(list(b))
+            else:
+                # Non-ortho junk: break chain
+                if len(new_pts) >= 2:
+                    kept.append(new_pts)
+                new_pts = [list(b)]
+                continue
+        if len(new_pts) >= 2:
+            if closed and len(new_pts) >= 3 and _dist(new_pts[0], new_pts[-1]) > 1e-3:
+                # only close if final edge would be ortho
+                a, b = new_pts[-1], new_pts[0]
+                ang = abs(math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))) % 180.0
+                if ang > 90.0:
+                    ang = 180.0 - ang
+                if ang <= 12.0 or abs(ang - 90.0) <= 12.0:
+                    new_pts.append(list(new_pts[0]))
+            kept.append(new_pts)
+    return kept, doors
+
+
+def _filter_tiny_wall_fragments(
+    walls: list[list[list[float]]],
+    min_length: float,
+    min_box_span: float,
+) -> list[list[list[float]]]:
+    out: list[list[list[float]]] = []
+    for poly in walls:
+        if len(poly) < 2:
+            continue
+        span_x0, span_y0, span_x1, span_y1 = _bbox(poly)
+        span = max(span_x1 - span_x0, span_y1 - span_y0)
+        if len(poly) == 2 and _segment_length(poly) < min_length:
+            continue
+        if span < min_box_span and _segment_length(poly) < min_length * 1.5:
+            continue
+        out.append(poly)
+    return out
+
+
+def _dedupe_wall_overlaps(
+    walls: list[list[list[float]]],
+    overlap_iou: float = 0.82,
+    endpoint_tol: float = 80.0,
+) -> list[list[list[float]]]:
+    kept: list[list[list[float]]] = []
+    boxes: list[tuple[float, float, float, float]] = []
+    for poly in sorted(walls, key=_segment_length, reverse=True):
+        box = _bbox(poly)
+        duplicate = False
+        for prev, prev_box in zip(kept, boxes):
+            if _bbox_iou(box, prev_box) >= overlap_iou:
+                duplicate = True
+                break
+            if len(poly) == 2 and len(prev) == 2:
+                if _dist(poly[0], prev[0]) <= endpoint_tol and _dist(poly[1], prev[1]) <= endpoint_tol:
+                    duplicate = True
+                    break
+                if _dist(poly[0], prev[1]) <= endpoint_tol and _dist(poly[1], prev[0]) <= endpoint_tol:
+                    duplicate = True
+                    break
+        if not duplicate:
+            kept.append(poly)
+            boxes.append(box)
+    return kept
+
+
 def wall_polygons_to_lines(
     walls: list[list[list[float]]],
     min_thickness: float = 80.0,
@@ -225,6 +420,10 @@ def wall_polygons_to_lines(
 def postprocess_walls(
     walls: list[list[list[float]]],
     partitions: list[list[list[float]]] | None = None,
+    *,
+    snap_tol_deg: float = 12.0,
+    min_fragment_factor: float = 0.012,
+    overlap_iou: float = 0.82,
 ) -> tuple[list[list[list[float]]], list[list[list[float]]], dict[str, Any]]:
     """
     Smooth closed contours, snap gaps, return cleaned walls/partitions + QA report.
@@ -240,20 +439,31 @@ def postprocess_walls(
     snap = max(30.0, span * 0.008)
     min_edge = max(80.0, span * 0.015)
     col_tol = max(20.0, span * 0.004)
+    min_fragment_len = max(120.0, span * min_fragment_factor)
+    min_box_span = max(60.0, span * 0.006)
 
     cleaned: list[list[list[float]]] = []
     for poly in walls:
         if len(poly) >= 4 and (_is_closed(poly, snap) or len(poly) > 4):
             p = _ensure_closed(poly, snap)
-            p = simplify_polygon(p)
+            p = simplify_polygon(p, epsilon_factor=0.006)
             p = _remove_spikes(p, min_edge=min_edge)
+            p = snap_to_orthogonal(p, tol_deg=max(snap_tol_deg + 3.0, snap_tol_deg))
             p = _snap_collinear(p, tol=col_tol)
+            p = snap_to_orthogonal(p, tol_deg=snap_tol_deg)
             p = _ensure_closed(p, snap)
+            cleaned.append(p)
+        elif len(poly) >= 2:
+            p = snap_to_orthogonal([list(q) for q in poly], tol_deg=max(snap_tol_deg + 3.0, snap_tol_deg))
             cleaned.append(p)
         else:
             cleaned.append([list(p) for p in poly])
 
     cleaned = _close_endpoint_gaps(cleaned, snap=snap)
+    cleaned = _filter_tiny_wall_fragments(cleaned, min_length=min_fragment_len, min_box_span=min_box_span)
+    cleaned = _dedupe_wall_overlaps(cleaned, overlap_iou=overlap_iou, endpoint_tol=snap)
+    # Peel door leaves after ortho snap (diagonals survive snap)
+    cleaned, door_leaves = peel_diagonal_door_leaves(cleaned)
 
     # Partitions: only endpoint snap
     parts_out: list[list[list[float]]] = []
@@ -278,5 +488,10 @@ def postprocess_walls(
     report = check_closedness(cleaned, tol_mm=snap)
     report["snap_mm"] = round(snap, 1)
     report["postprocessed"] = True
+    report["orthogonal_snap"] = True
+    report["door_leaves_peeled"] = len(door_leaves)
+    report["tiny_fragments_filtered"] = True
+    report["wall_overlap_dedup"] = True
     report["centerlines"] = len(wall_polygons_to_lines(cleaned))
+    report["door_leaves"] = door_leaves
     return cleaned, parts_out, report

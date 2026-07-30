@@ -8,6 +8,7 @@
   const drawingsList = $("#drawings-list");
   const photosList = $("#photos-list");
   const startBtn = $("#start-btn");
+  const exportBtn = $("#export-dxf-btn");
   const progressWrap = $("#progress-wrap");
   const progressBar = $("#progress-bar");
   const progressPct = $("#progress-pct");
@@ -17,6 +18,8 @@
   const viewerEl = $("#viewer");
   const layerToggles = $("#layer-toggles");
   const scaleHint = $("#scale-hint");
+  const filterPanel = $("#filter-panel");
+  const filterStats = $("#filter-stats");
 
   const state = {
     drawings: [],
@@ -115,16 +118,15 @@
 
   function renderLayers(layerState) {
     layerToggles.innerHTML = "";
-    const labels = {
-      "00_FRAME": "00_Оформление",
-      "00_STAMP_TEXT": "00_Текст",
+    const labels = window.DXF_LAYER_LABELS || {
       "01_WALLS": "01_Стены",
-      "02_PARTITIONS": "02_Перегородки",
       "03_AXES": "03_Оси",
       "04_DIMS_GOST": "04_Размеры",
       "05_OPENINGS": "05_Окна_Двери",
+      "06_DETAIL": "06_Детали",
     };
     Object.keys(layerState).sort().forEach((name) => {
+      if (name.startsWith("__")) return;
       const id = `layer-${name}`;
       const label = document.createElement("label");
       const title = labels[name] || name;
@@ -136,15 +138,51 @@
     });
   }
 
-  async function loadViewer(jobId) {
-    const res = await fetch(`/api/jobs/${jobId}/scene`);
-    if (!res.ok) throw new Error("Не удалось загрузить сцену");
-    const scene = await res.json();
+  function syncFilterSliders(filters) {
+    Object.entries(filters || {}).forEach(([key, val]) => {
+      const input = $(`#filter-${key}`);
+      const span = $(`#filter-${key}-value`);
+      if (input) input.value = String(val);
+      if (span) span.textContent = String(val);
+    });
+  }
+
+  function updateFilterStats() {
+    if (!filterStats || !state.viewer) return;
+    const n = state.viewer.filteredContours?.length || 0;
+    const total = state.viewer.raw?.contours?.length || 0;
+    filterStats.textContent = `Стен в предпросмотре: ${n} / ${total} контуров`;
+  }
+
+  function wireFilters() {
+    document.querySelectorAll(".filter-panel input[type='range']").forEach((input) => {
+      const valueSpan = document.getElementById(`${input.id}-value`);
+      input.addEventListener("input", () => {
+        if (valueSpan) valueSpan.textContent = input.value;
+        if (!state.viewer) return;
+        const name = input.id.replace("filter-", "");
+        state.viewer.setFilter(name, parseFloat(input.value));
+        updateFilterStats();
+      });
+    });
+  }
+  wireFilters();
+
+  async function loadPreview(jobId) {
+    const res = await fetch(`/api/jobs/${jobId}/raw`);
+    if (!res.ok) throw new Error("Не удалось загрузить предпросмотр");
+    const raw = await res.json();
     if (!state.viewer) {
       state.viewer = new window.DxfWebGLViewer(viewerEl);
     }
-    const layers = state.viewer.setScene(scene);
+    const layers = state.viewer.setRawGeometry(raw);
+    syncFilterSliders(state.viewer.getFilters());
     renderLayers(layers);
+    if (filterPanel) filterPanel.hidden = false;
+    // Filter panel changes grid width — resize canvases to fill the right column
+    requestAnimationFrame(() => state.viewer?._resize?.());
+    updateFilterStats();
+    if (exportBtn) exportBtn.disabled = false;
   }
 
   async function pollJob(jobId) {
@@ -161,20 +199,20 @@
             scaleHint?.classList.add("is-warn");
             const warn =
               data.scale_warning ||
-              "Масштаб ненадёжен. Укажите контрольный отрезок в мм и запустите снова — без этого условные 12 000 мм не считать верными.";
-            setStatus(`Готово. DXF готов. ${warn}`, "warn");
+              "Масштаб ненадёжен. Укажите контрольный отрезок в мм и запустите снова.";
+            setStatus(`Предпросмотр готов. ${warn}`, "warn");
           } else {
             scaleHint?.classList.remove("is-warn");
-            setStatus("Готово. DXF готов — откройте в AutoCAD или LibreCAD.", "ok");
+            setStatus("Предпросмотр готов. Настройте фильтры, затем «Сгенерировать DXF».", "ok");
           }
-          downloadBtn.disabled = false;
-          downloadBtn.removeAttribute("aria-disabled");
-          downloadBtn.href = `/api/jobs/${jobId}/download`;
+          downloadBtn.disabled = true;
+          downloadBtn.setAttribute("aria-disabled", "true");
+          downloadBtn.removeAttribute("href");
           downloadBtn.textContent = "Скачать DXF";
           try {
-            await loadViewer(jobId);
+            await loadPreview(jobId);
           } catch (err) {
-            viewerEl.textContent = err.message || "Ошибка просмотрщика";
+            viewerEl.textContent = err.message || "Ошибка предпросмотра";
           }
           startBtn.disabled = false;
         } else if (data.status === "error") {
@@ -190,6 +228,33 @@
     }, 500);
   }
 
+  exportBtn?.addEventListener("click", async () => {
+    if (!state.jobId || !state.viewer) return;
+    exportBtn.disabled = true;
+    setStatus("Генерация DXF с текущими фильтрами…");
+    try {
+      const res = await fetch(`/api/jobs/${state.jobId}/export`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filters: state.viewer.getFilters() }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      downloadBtn.disabled = false;
+      downloadBtn.removeAttribute("aria-disabled");
+      downloadBtn.href = data.download || `/api/jobs/${state.jobId}/download`;
+      downloadBtn.textContent = "Скачать DXF";
+      setStatus(`DXF готов (стен: ${data.wall_count ?? "—"}). Можно скачать.`, "ok");
+    } catch (err) {
+      setStatus(err.message || "Ошибка экспорта DXF", "error");
+    } finally {
+      exportBtn.disabled = false;
+    }
+  });
+
   form?.addEventListener("submit", async (e) => {
     e.preventDefault();
     if (!state.drawings.length) return;
@@ -199,13 +264,15 @@
     state.photos.forEach((f) => fd.append("photos", f));
 
     startBtn.disabled = true;
+    if (exportBtn) exportBtn.disabled = true;
     downloadBtn.disabled = true;
     downloadBtn.setAttribute("aria-disabled", "true");
     downloadBtn.removeAttribute("href");
     layerToggles.innerHTML = "";
+    if (filterPanel) filterPanel.hidden = true;
     viewerEl.textContent = "Обработка…";
     setProgress(2, "Загрузка файлов…");
-    setStatus("Задача принята, обрабатываем…");
+    setStatus("Задача принята, готовим предпросмотр…");
 
     try {
       const res = await fetch("/api/jobs", { method: "POST", body: fd });

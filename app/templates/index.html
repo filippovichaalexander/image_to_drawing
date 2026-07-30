@@ -77,6 +77,15 @@
           <label id="scale-hint">Контрольный отрезок (мм)
             <input name="scale_mm" type="number" min="1" step="1" placeholder="обязателен, если OCR неуверен">
           </label>
+          <label>Профиль векторизации стен
+            <select name="vectorization_profile">
+              <option value="default" selected>Стандартный (ГОСТ, авто-подбор при необходимости)</option>
+              <option value="thin_lines">Тонкие линии</option>
+              <option value="noisy">Шумный чертёж</option>
+              <option value="thick_lines">Толстые линии</option>
+              <option value="high_detail">Много деталей</option>
+            </select>
+          </label>
           <p class="hint" id="scale-help">
             Приложение читает размерные надписи и привязывает их к длине цепочки на плане.
             Если уверенность низкая или размеры не найдены — <strong>не используйте условные 12 000 мм</strong>:
@@ -86,6 +95,7 @@
 
         <div class="actions">
           <button type="submit" class="btn btn-primary" id="start-btn" disabled>Обработать</button>
+          <button type="button" class="btn btn-primary" id="export-dxf-btn" disabled>Сгенерировать DXF</button>
           <a class="btn" id="download-btn" aria-disabled="true">Скачать DXF</a>
         </div>
 
@@ -104,11 +114,48 @@
 
     <section class="viewer-panel" aria-label="Просмотр чертежа">
       <div class="viewer-toolbar">
-        <strong>Просмотр (WebGL)</strong>
-        <span class="hint" id="viewer-hint">Колесо — зум, перетаскивание — панорама</span>
+        <strong>Предпросмотр (JSON → WebGL)</strong>
+        <span class="hint" id="viewer-hint">Ползунки меняют только пороги, без пересчёта изображения. DXF — после экспорта.</span>
         <div class="layer-toggles" id="layer-toggles"></div>
       </div>
-      <div class="viewer" id="viewer">Загрузите чертежи и нажмите «Обработать».</div>
+      <div class="viewer-layout">
+        <aside class="filter-panel" id="filter-panel" hidden>
+          <h3>Настройка стен (live)</h3>
+          <p class="hint">Фильтр применяется в браузере к уже извлечённым контурам.</p>
+          <label>
+            Толщина линии min (med_t)
+            <input type="range" id="filter-med_t_min" min="0.1" max="2.0" step="0.05" value="0.55">
+            <span id="filter-med_t_min-value">0.55</span>
+          </label>
+          <label>
+            Thinness min
+            <input type="range" id="filter-thinness_min" min="10" max="120" step="5" value="40">
+            <span id="filter-thinness_min-value">40</span>
+          </label>
+          <label>
+            Thinness max
+            <input type="range" id="filter-thinness_max" min="80" max="800" step="10" value="320">
+            <span id="filter-thinness_max-value">320</span>
+          </label>
+          <label>
+            Aspect min
+            <input type="range" id="filter-aspect_min" min="1.0" max="4.0" step="0.05" value="1.2">
+            <span id="filter-aspect_min-value">1.2</span>
+          </label>
+          <label>
+            Ink ratio min
+            <input type="range" id="filter-ink_ratio_min" min="0" max="1.0" step="0.05" value="0.15">
+            <span id="filter-ink_ratio_min-value">0.15</span>
+          </label>
+          <label>
+            Мин. длина (мм)
+            <input type="range" id="filter-min_length" min="50" max="2000" step="10" value="200">
+            <span id="filter-min_length-value">200</span>
+          </label>
+          <p class="hint" id="filter-stats">Стен в предпросмотре: —</p>
+        </aside>
+        <div class="viewer" id="viewer">Загрузите чертежи и нажмите «Обработать».</div>
+      </div>
     </section>
   </div>
   <script src="/static/js/viewer.js" defer></script>

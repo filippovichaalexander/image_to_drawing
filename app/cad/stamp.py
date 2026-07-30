@@ -20,6 +20,8 @@ def ensure_layers(doc: ezdxf.document.Drawing) -> None:
         LAYER_NAMES["axes"]: {"color": colors.CYAN, "lineweight": LINEWEIGHT["thin"], "linetype": "CENTER"},
         LAYER_NAMES["dims"]: {"color": colors.GREEN, "lineweight": LINEWEIGHT["thin"]},
         LAYER_NAMES["openings"]: {"color": colors.BLUE, "lineweight": LINEWEIGHT["medium"]},
+        LAYER_NAMES["detail"]: {"color": colors.WHITE, "lineweight": LINEWEIGHT["thin"]},
+        LAYER_NAMES["hatch"]: {"color": 6, "lineweight": LINEWEIGHT["thin"]},
     }
     if "CENTER" not in doc.linetypes:
         doc.linetypes.add("CENTER", pattern="A,12.5,-2.5,0.5,-2.5", description="Axis center")

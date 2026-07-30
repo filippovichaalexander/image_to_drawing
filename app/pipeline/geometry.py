@@ -19,16 +19,33 @@ def extract_geometry(
     cleaned_images: list[Path],
     ai_mode: str = "stub",
     source_images: list[Path] | None = None,
+    vectorization_profile: str = "default",
+    vectorization_auto_profile: bool = True,
 ) -> dict[str, Any]:
     """
-    `cleaned_images` — binary denoise outputs (stub vectorization).
-    `source_images` — original rasters for YOLO/OCR (preferred; cleaned kills text).
+    Prefer drawing-faithful exact-trace (contours / lines / arcs / circles).
 
-    AI_MODE=full: try YOLO-seg for walls/openings, but if YOLO is sparse
-    (typical on CAD scans with the bootstrap Archivision weights), keep
-    OpenCV stub walls — otherwise the viewer shows only an empty rectangle.
+    Semantic AI (YOLO) is used only inside exact-trace for optional opening
+    classification. Stub / full OpenCV+YOLO paths remain as fallback.
     """
     sources = list(source_images or cleaned_images)
+
+    # Primary path: reproduce the scan as DXF primitives
+    try:
+        from app.pipeline.exact_trace import extract_exact_trace
+
+        traced = extract_exact_trace(
+            sources,
+            use_yolo_openings=(ai_mode == "full"),
+            vectorization_profile=vectorization_profile,
+            vectorization_auto_profile=vectorization_auto_profile,
+        )
+        if _wall_segment_count(traced) >= 1 or traced.get("strokes") or traced.get("details"):
+            return traced
+        logger.warning("exact_trace returned empty geometry; falling back")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("exact_trace failed (%s); falling back to stub/YOLO", exc)
+
     stub = _extract_stub(cleaned_images, ai_mode=ai_mode, source_images=sources)
 
     if ai_mode != "full":
@@ -144,11 +161,7 @@ def _extract_full_ai(
     preprocess → YOLO-seg → PaddleOCR → scale → postprocess → geometry dict.
     """
     from app.pipeline.ocr import extract_dimensions_and_axes
-    from app.pipeline.postprocess import (
-        postprocess_walls,
-        simplify_polygon,
-        wall_polygons_to_lines,
-    )
+    from app.pipeline.postprocess import postprocess_walls
     from app.pipeline.preprocess import prepare_for_inference
     from app.pipeline.scale import calibrate_scale, provisional_scale
     from app.pipeline.segmentation import segment_floorplan
@@ -182,7 +195,7 @@ def _extract_full_ai(
             ocr_to_orig=float(prep["ocr_scale"]),
         )
 
-        wall_px = [simplify_polygon(p) for p in seg["walls"]]
+        wall_px = [[list(pt) for pt in poly] for poly in seg["walls"]]
         scale = calibrate_scale(dims, wall_px, prep["orig_w"], prep["orig_h"])
         if scale is None:
             scale = provisional_scale(prep["orig_w"], prep["orig_h"])
@@ -204,12 +217,6 @@ def _extract_full_ai(
                 if abs(pts[0][0] - pts[-1][0]) > 1 or abs(pts[0][1] - pts[-1][1]) > 1:
                     pts.append(list(pts[0]))
                 sheet_walls.append(pts)
-
-        # Centerlines as additional wall segments when masks are thick blobs
-        for line in wall_polygons_to_lines(
-            [[_px_to_mm_yup(p[0], p[1], oh, sx, sy) for p in poly] for poly in wall_px]
-        ):
-            sheet_walls.append([line["p1"], line["p2"]])
 
         walls.extend(sheet_walls)
 
@@ -544,6 +551,58 @@ def _extract_ortho_walls(gray: np.ndarray) -> tuple[list[tuple[int, int, int, in
     return segs, (x0, y0, x1, y1)
 
 
+def _extract_wall_contours(gray: np.ndarray) -> tuple[list[list[list[float]]], tuple[float, float, float, float]]:
+    """
+    Preserve thick wall outlines from a clean raster.
+
+    Unlike `_extract_ortho_walls()`, this keeps closed wall polygons instead of
+    collapsing everything into orthogonal centerlines. It is intentionally biased
+    toward the visual drawing matching the source JPG more closely.
+    """
+    h, w = gray.shape[:2]
+    blur = cv2.GaussianBlur(gray, (3, 3), 0)
+    _, bw = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # Favor structural ink over dimension ticks/text while keeping wall thickness.
+    dist = cv2.distanceTransform(bw, cv2.DIST_L2, 5)
+    thick = ((dist >= 1.0).astype(np.uint8) * 255)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    thick = cv2.morphologyEx(thick, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+    contours, _ = cv2.findContours(thick, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return [], (0.0, 0.0, float(w), float(h))
+
+    min_area = max(80.0, 0.00025 * h * w)
+    min_side = max(10.0, 0.02 * min(h, w))
+    polys: list[list[list[float]]] = []
+    xs: list[float] = []
+    ys: list[float] = []
+
+    for cnt in contours:
+        area = float(cv2.contourArea(cnt))
+        if area < min_area:
+            continue
+        x, y, cw, ch = cv2.boundingRect(cnt)
+        if max(cw, ch) < min_side:
+            continue
+        peri = float(cv2.arcLength(cnt, True))
+        approx = cv2.approxPolyDP(cnt, max(1.5, 0.002 * peri), True)
+        pts = approx.reshape(-1, 2).tolist()
+        if len(pts) < 3:
+            continue
+        poly = [[float(px), float(py)] for px, py in pts]
+        if poly[0] != poly[-1]:
+            poly.append(list(poly[0]))
+        polys.append(poly)
+        xs.extend([float(x), float(x + cw)])
+        ys.extend([float(y), float(y + ch)])
+
+    if not polys:
+        return [], (0.0, 0.0, float(w), float(h))
+
+    return polys, (min(xs), min(ys), max(xs), max(ys))
+
+
 def _px_to_mm(x: float, y: float, h: int, scale_x: float, scale_y: float) -> list[float]:
     return [float(x * scale_x), float((h - y) * scale_y)]
 
@@ -573,7 +632,10 @@ def _sheet_geometry(
 
     small, up = _downscale(edge_img)
     sh, sw = small.shape[:2]
-    segs_px, bbox = _extract_ortho_walls(small)
+    wall_polys_px, bbox = _extract_wall_contours(small)
+    segs_px, ortho_bbox = _extract_ortho_walls(small)
+    if not wall_polys_px:
+        bbox = ortho_bbox
     x0, y0, x1, y1 = bbox
     bbox_w_px = max(x1 - x0, 1.0)
     bbox_h_px = max(y1 - y0, 1.0)
@@ -616,27 +678,33 @@ def _sheet_geometry(
     partitions: list[list[list[float]]] = []
     min_side = float(min(sw, sh))
 
-    outer = [
-        _px_to_mm(x0, y0, sh, scale_x, scale_y),
-        _px_to_mm(x1, y0, sh, scale_x, scale_y),
-        _px_to_mm(x1, y1, sh, scale_x, scale_y),
-        _px_to_mm(x0, y1, sh, scale_x, scale_y),
-        _px_to_mm(x0, y0, sh, scale_x, scale_y),
-    ]
-    walls.append(outer)
+    if wall_polys_px:
+        for poly in wall_polys_px:
+            mm_poly = [_px_to_mm(px, py, sh, scale_x, scale_y) for px, py in poly]
+            if len(mm_poly) >= 4:
+                walls.append(mm_poly)
+    else:
+        outer = [
+            _px_to_mm(x0, y0, sh, scale_x, scale_y),
+            _px_to_mm(x1, y0, sh, scale_x, scale_y),
+            _px_to_mm(x1, y1, sh, scale_x, scale_y),
+            _px_to_mm(x0, y1, sh, scale_x, scale_y),
+            _px_to_mm(x0, y0, sh, scale_x, scale_y),
+        ]
+        walls.append(outer)
 
-    # Internal segments only (outer rectangle already added as closed poly)
+    # Keep orthogonal segments only as supplemental partitions / thin internals.
     for xa, ya, xb, yb in segs_px[4:] if len(segs_px) > 4 else []:
         length = float(np.hypot(xb - xa, yb - ya))
         kind = _classify_wall_len(length, min_side)
         if kind == "skip":
             continue
-        # Skip near-duplicates of the envelope
-        if length >= 0.85 * max(bbox_w_px, bbox_h_px):
+        # Skip near-duplicates of the contour envelope
+        if wall_polys_px and length >= 0.85 * max(bbox_w_px, bbox_h_px):
             continue
         p1 = _px_to_mm(xa, ya, sh, scale_x, scale_y)
         p2 = _px_to_mm(xb, yb, sh, scale_x, scale_y)
-        (walls if kind == "wall" else partitions).append([p1, p2])
+        partitions.append([p1, p2])
 
     walls, partitions, closedness = postprocess_walls(walls, partitions)
 

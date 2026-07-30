@@ -45,6 +45,8 @@ def run_pipeline(job_id: str) -> None:
             cleaned,
             ai_mode=settings.ai_mode,
             source_images=sheet_paths,
+            vectorization_profile=str(job.metadata.get("vectorization_profile") or settings.vectorization_profile),
+            vectorization_auto_profile=bool(settings.vectorization_auto_profile),
         )
         needs_scale = bool(geometry.get("needs_scale")) and not job.metadata.get("scale_mm")
         jobs.update(
@@ -60,7 +62,7 @@ def run_pipeline(job_id: str) -> None:
                 dims = geometry.get("dimensions") or []
                 if dims and dims[0].get("value_mm"):
                     factor = target / float(dims[0]["value_mm"])
-                    for key in ("walls", "partitions"):
+                    for key in ("walls", "partitions", "details", "strokes", "hatches"):
                         for poly in geometry.get(key) or []:
                             for p in poly:
                                 p[0] *= factor
@@ -70,12 +72,30 @@ def run_pipeline(job_id: str) -> None:
                             if k in op:
                                 op[k][0] *= factor
                                 op[k][1] *= factor
+                        if op.get("arc"):
+                            for k in ("cx", "cy", "r"):
+                                if k in op["arc"]:
+                                    op["arc"][k] = float(op["arc"][k]) * factor
+                    for circ in geometry.get("circles") or []:
+                        for k in ("cx", "cy", "r"):
+                            if k in circ:
+                                circ[k] = float(circ[k]) * factor
                     for axis in geometry.get("axes") or []:
                         for k, v in list(axis.items()):
                             if k in {"name", "sheet", "ocr"}:
                                 continue
+                            if k == "bubble" and isinstance(v, dict):
+                                for bk in ("cx", "cy", "r"):
+                                    if bk in v:
+                                        v[bk] = float(v[bk]) * factor
+                                continue
                             if isinstance(v, (int, float)):
                                 axis[k] = float(v) * factor
+                    for t in geometry.get("texts") or []:
+                        if t.get("pos"):
+                            t["pos"] = [t["pos"][0] * factor, t["pos"][1] * factor]
+                        if t.get("height"):
+                            t["height"] = float(t["height"]) * factor
                     for d in dims:
                         d["value_mm"] = round(float(d["value_mm"]) * factor)
                         if "p1" in d and "p2" in d:
@@ -107,27 +127,20 @@ def run_pipeline(job_id: str) -> None:
         from app.pipeline.validate import correlate_dimensions
 
         geometry = correlate_dimensions(geometry, metadata=job.metadata)
-        (out_root / "geometry.json").write_text(
+        geometry_path = out_root / "geometry.json"
+        geometry_path.write_text(
             json.dumps(geometry, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
-        jobs.update(job_id, progress=78, step="Генерация DXF по ГОСТ…")
-        from app.cad.export import build_dxf
+        # Live preview JSON (no DXF yet) — filters apply client-side
+        jobs.update(job_id, progress=82, step="Подготовка интерактивного предпросмотра…")
+        from app.pipeline.preview import build_preview_payload
 
-        code = str(job.metadata.get("code", "drawing")).replace("/", "-")
-        out_dxf = out_root / f"{code}.dxf"
-        build_dxf(geometry, job.metadata, out_dxf)
-
-        jobs.update(job_id, progress=90, step="Упаковка DXF…")
-        from app.cad.package import build_download_package
-        from app.cad.scene import dxf_to_scene
-
-        package_path = out_root / f"{code}_package.zip"
-        build_download_package(out_dxf, package_path, job.metadata)
-        scene = dxf_to_scene(out_dxf)
-        (out_root / "scene.json").write_text(
-            json.dumps(scene, ensure_ascii=False),
+        preview = build_preview_payload(geometry)
+        preview_path = out_root / "preview.json"
+        preview_path.write_text(
+            json.dumps(preview, ensure_ascii=False),
             encoding="utf-8",
         )
 
@@ -135,11 +148,13 @@ def run_pipeline(job_id: str) -> None:
             job_id,
             status=JobStatus.done,
             progress=100,
-            step="Готово",
-            result_path=out_dxf,
-            dxf_path=out_dxf,
-            package_path=package_path,
-            scene_path=out_root / "scene.json",
+            step="Предпросмотр готов — настройте фильтры и сгенерируйте DXF",
+            geometry_path=geometry_path,
+            preview_path=preview_path,
+            result_path=None,
+            dxf_path=None,
+            package_path=None,
+            scene_path=None,
         )
         time.sleep(0.05)
     except Exception as exc:  # noqa: BLE001

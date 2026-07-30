@@ -2,43 +2,70 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
 import ezdxf
+from ezdxf.enums import TextEntityAlignment
 
 from app.cad.dimensions import add_gost_dimension
 from app.cad.gost import LAYER_NAMES
 from app.cad.stamp import add_gost_stamp_and_frame, ensure_gost_style, ensure_layers, pick_sheet_format
 
 
-def _offset_pair(
-    p1: tuple[float, float],
-    p2: tuple[float, float],
-    half_t: float,
-) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]]:
-    """Return two parallel edges (a1-a2 and b1-b2) for a thick wall segment."""
-    import math
+def _latin_axis(name: str) -> str:
+    return {"А": "A", "Б": "B", "В": "V", "Г": "G", "Д": "D", "Е": "E"}.get(name, name)
 
-    x1, y1 = p1
-    x2, y2 = p2
-    dx, dy = x2 - x1, y2 - y1
-    length = math.hypot(dx, dy) or 1.0
-    nx, ny = -dy / length * half_t, dx / length * half_t
-    return (
-        (x1 + nx, y1 + ny),
-        (x2 + nx, y2 + ny),
-        (x1 - nx, y1 - ny),
-        (x2 - nx, y2 - ny),
+
+def _add_axis_bubble(msp: Any, cx: float, cy: float, r: float, name: str, content_h: float) -> None:
+    layer = LAYER_NAMES["axes"]
+    msp.add_circle((cx, cy), radius=max(r, 120.0), dxfattribs={"layer": layer})
+    if not name:
+        return
+    t = msp.add_text(
+        _latin_axis(name),
+        height=max(r * 0.9, content_h * 0.012, 140.0),
+        dxfattribs={"layer": layer, "style": "GOST_ST"},
     )
+    t.set_placement((cx, cy), align=TextEntityAlignment.MIDDLE_CENTER)
 
 
-def _add_thick_segment(msp: Any, p1: tuple[float, float], p2: tuple[float, float], half_t: float, layer: str) -> None:
-    a1, a2, b1, b2 = _offset_pair(p1, p2, half_t)
-    msp.add_line(a1, a2, dxfattribs={"layer": layer})
-    msp.add_line(b1, b2, dxfattribs={"layer": layer})
-    msp.add_line(a1, b1, dxfattribs={"layer": layer})
-    msp.add_line(a2, b2, dxfattribs={"layer": layer})
+def _add_wall_hatch(msp: Any, pts: list[tuple[float, float]]) -> None:
+    """Solid-ish hatch for closed wall polygons (visual thickness)."""
+    if len(pts) < 4:
+        return
+    try:
+        hatch = msp.add_hatch(color=1, dxfattribs={"layer": LAYER_NAMES["walls"]})
+        hatch.paths.add_polyline_path(pts, is_closed=True)
+        hatch.set_solid_fill(color=1)
+    except Exception:  # noqa: BLE001
+        # Older / restricted DXF profiles — outline already drawn
+        pass
+
+
+def _add_door_arc(msp: Any, arc: dict[str, Any]) -> None:
+    cx = float(arc["cx"])
+    cy = float(arc["cy"])
+    r = float(arc["r"])
+    start = float(arc.get("start_deg", 0.0))
+    end = float(arc.get("end_deg", 90.0))
+    if abs(end - start) < 1.0:
+        end = start + 90.0
+    msp.add_arc(
+        center=(cx, cy),
+        radius=max(r, 50.0),
+        start_angle=start,
+        end_angle=end,
+        dxfattribs={"layer": LAYER_NAMES["openings"]},
+    )
+    # Door leaf as radius line at start angle
+    a0 = math.radians(start)
+    msp.add_line(
+        (cx, cy),
+        (cx + r * math.cos(a0), cy + r * math.sin(a0)),
+        dxfattribs={"layer": LAYER_NAMES["openings"]},
+    )
 
 
 def build_dxf(geometry: dict[str, Any], metadata: dict[str, Any], out_path: Path) -> Path:
@@ -49,33 +76,30 @@ def build_dxf(geometry: dict[str, Any], metadata: dict[str, Any], out_path: Path
     msp = doc.modelspace()
 
     walls = geometry.get("walls") or []
-    xs = [p[0] for wall in walls for p in wall] or [0, 12000]
-    ys = [p[1] for wall in walls for p in wall] or [0, 8000]
+    strokes = geometry.get("strokes") or []
+    details = geometry.get("details") or []
+    xs = [p[0] for poly in (walls + strokes + details) for p in poly] or [0, 12000]
+    ys = [p[1] for poly in (walls + strokes + details) for p in poly] or [0, 8000]
     min_x, max_x = min(xs), max(xs)
     min_y, max_y = min(ys), max(ys)
     content_w = max(max_x - min_x, 1.0)
     content_h = max(max_y - min_y, 1.0)
+    fill_walls = bool(geometry.get("fill_walls"))
 
-    # --- Modelspace: real millimetres (do NOT shrink into A3 paper) ---
-    # Outer closed walls: double line (thickness). Internal: centerlines only
-    # (drawing every segment as a thick box made the preview chaotic).
-    wall_t = max(80.0, min(content_w, content_h) * 0.012)
-
+    # --- Walls as polylines (+ optional hatch fill for thickness) ---
     for wall in walls:
         pts = [(float(p[0]), float(p[1])) for p in wall]
-        if len(pts) >= 3 and pts[0] == pts[-1]:
-            msp.add_lwpolyline(pts, dxfattribs={"layer": LAYER_NAMES["walls"]})
-            # Parallel inset for wall thickness (rectangular envelope only)
-            xs_ = [p[0] for p in pts[:-1]]
-            ys_ = [p[1] for p in pts[:-1]]
-            if xs_ and ys_:
-                ix0, ix1 = min(xs_) + wall_t, max(xs_) - wall_t
-                iy0, iy1 = min(ys_) + wall_t, max(ys_) - wall_t
-                if ix1 > ix0 and iy1 > iy0:
-                    msp.add_lwpolyline(
-                        [(ix0, iy0), (ix1, iy0), (ix1, iy1), (ix0, iy1), (ix0, iy0)],
-                        dxfattribs={"layer": LAYER_NAMES["walls"]},
-                    )
+        if len(pts) >= 3:
+            closed = pts[0] == pts[-1] or (
+                abs(pts[0][0] - pts[-1][0]) < 1e-3 and abs(pts[0][1] - pts[-1][1]) < 1e-3
+            )
+            msp.add_lwpolyline(
+                pts,
+                close=closed,
+                dxfattribs={"layer": LAYER_NAMES["walls"]},
+            )
+            if fill_walls and closed and len(pts) >= 4:
+                _add_wall_hatch(msp, pts[:-1] if pts[0] == pts[-1] else pts)
         elif len(pts) >= 2:
             msp.add_lwpolyline(pts, dxfattribs={"layer": LAYER_NAMES["walls"]})
 
@@ -84,55 +108,160 @@ def build_dxf(geometry: dict[str, Any], metadata: dict[str, Any], out_path: Path
         if len(pts) >= 2:
             msp.add_lwpolyline(pts, dxfattribs={"layer": LAYER_NAMES["partitions"]})
 
+    for poly in details:
+        pts = [(float(p[0]), float(p[1])) for p in poly]
+        if len(pts) >= 2:
+            msp.add_lwpolyline(pts, dxfattribs={"layer": LAYER_NAMES["detail"]})
+
+    for poly in strokes:
+        pts = [(float(p[0]), float(p[1])) for p in poly]
+        if len(pts) >= 2:
+            msp.add_lwpolyline(pts, dxfattribs={"layer": LAYER_NAMES["detail"]})
+
+    for poly in geometry.get("hatches") or []:
+        pts = [(float(p[0]), float(p[1])) for p in poly]
+        if len(pts) >= 2:
+            msp.add_lwpolyline(pts, dxfattribs={"layer": LAYER_NAMES["hatch"]})
+
+    # Standalone circles (axis bubbles / fixtures)
+    for circ in geometry.get("circles") or []:
+        msp.add_circle(
+            (float(circ["cx"]), float(circ["cy"])),
+            radius=max(float(circ.get("r") or 100.0), 20.0),
+            dxfattribs={"layer": LAYER_NAMES.get(str(circ.get("layer") or "axes"), LAYER_NAMES["axes"])},
+        )
+
     for opening in geometry.get("openings") or []:
+        kind = str(opening.get("kind") or opening.get("type") or "").lower()
+        if opening.get("arc"):
+            _add_door_arc(msp, opening["arc"])
+            continue
+        if opening.get("leaf") and len(opening["leaf"]) >= 2:
+            a, b = opening["leaf"][0], opening["leaf"][-1]
+            msp.add_line(
+                (float(a[0]), float(a[1])),
+                (float(b[0]), float(b[1])),
+                dxfattribs={"layer": LAYER_NAMES["openings"]},
+            )
+            continue
         if "p1" not in opening or "p2" not in opening:
             continue
         x0, x1 = sorted((float(opening["p1"][0]), float(opening["p2"][0])))
         y0, y1 = sorted((float(opening["p1"][1]), float(opening["p2"][1])))
+        # Keep rectangle with visible width (expand thin boxes)
+        if abs(x1 - x0) < 30:
+            mid = (x0 + x1) / 2
+            x0, x1 = mid - 40, mid + 40
+        if abs(y1 - y0) < 30:
+            mid = (y0 + y1) / 2
+            y0, y1 = mid - 40, mid + 40
+        # Diagonal door leaf (not axis-aligned box)
+        dx = abs(float(opening["p2"][0]) - float(opening["p1"][0]))
+        dy = abs(float(opening["p2"][1]) - float(opening["p1"][1]))
+        if kind == "door" and min(dx, dy) > 0.2 * max(dx, dy, 1):
+            msp.add_line(
+                (float(opening["p1"][0]), float(opening["p1"][1])),
+                (float(opening["p2"][0]), float(opening["p2"][1])),
+                dxfattribs={"layer": LAYER_NAMES["openings"]},
+            )
+            continue
         msp.add_lwpolyline(
             [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)],
             dxfattribs={"layer": LAYER_NAMES["openings"]},
         )
-        if str(opening.get("type", "")).lower() == "door":
-            msp.add_line((x0, y0), (x1, y1), dxfattribs={"layer": LAYER_NAMES["openings"]})
+        if kind == "door":
+            # Swing arc approximation from hinge at (x0,y0)
+            r = max(abs(x1 - x0), abs(y1 - y0), 200.0)
+            msp.add_arc(
+                center=(x0, y0),
+                radius=r,
+                start_angle=0,
+                end_angle=90,
+                dxfattribs={"layer": LAYER_NAMES["openings"]},
+            )
+            msp.add_line((x0, y0), (x0 + r, y0), dxfattribs={"layer": LAYER_NAMES["openings"]})
+        elif kind == "window":
+            # Triple line window symbol inside the opening
+            mid_y = (y0 + y1) / 2
+            mid_x = (x0 + x1) / 2
+            if abs(x1 - x0) >= abs(y1 - y0):
+                for dy_off in (-(y1 - y0) * 0.2, 0.0, (y1 - y0) * 0.2):
+                    msp.add_line(
+                        (x0, mid_y + dy_off),
+                        (x1, mid_y + dy_off),
+                        dxfattribs={"layer": LAYER_NAMES["openings"]},
+                    )
+            else:
+                for dx_off in (-(x1 - x0) * 0.2, 0.0, (x1 - x0) * 0.2):
+                    msp.add_line(
+                        (mid_x + dx_off, y0),
+                        (mid_x + dx_off, y1),
+                        dxfattribs={"layer": LAYER_NAMES["openings"]},
+                    )
 
     for axis in geometry.get("axes") or []:
+        name = str(axis.get("name", ""))
+        bubble = axis.get("bubble")
         if "x" in axis:
             x = float(axis["x"])
-            p1 = (x, float(axis.get("y0", min_y)))
-            p2 = (x, float(axis.get("y1", max_y)))
+            p1 = (x, float(axis.get("y0", min_y - 1500)))
+            p2 = (x, float(axis.get("y1", max_y + 1500)))
             msp.add_line(p1, p2, dxfattribs={"layer": LAYER_NAMES["axes"], "linetype": "CENTER"})
-            # Prefer ASCII in R2000 DXF (Cyrillic becomes \\U+XXXX otherwise)
-            name = str(axis.get("name", ""))
-            latin = {"А": "A", "Б": "B", "В": "V", "Г": "G", "Д": "D", "Е": "E"}.get(name, name)
-            t = msp.add_text(
-                latin,
-                height=max(200.0, content_h * 0.015),
-                dxfattribs={"layer": LAYER_NAMES["axes"], "style": "GOST_ST"},
-            )
-            t.set_placement((p2[0], p2[1] + 100))
+            if bubble:
+                _add_axis_bubble(
+                    msp,
+                    float(bubble.get("cx", x)),
+                    float(bubble.get("cy", p2[1])),
+                    float(bubble.get("r") or max(180.0, content_h * 0.012)),
+                    name,
+                    content_h,
+                )
+            else:
+                # Default GOST bubble at both ends
+                br = max(180.0, content_h * 0.012)
+                _add_axis_bubble(msp, x, p2[1] + br * 1.2, br, name, content_h)
+                _add_axis_bubble(msp, x, p1[1] - br * 1.2, br, name, content_h)
         elif "y" in axis:
             y = float(axis["y"])
-            p1 = (float(axis.get("x0", min_x)), y)
-            p2 = (float(axis.get("x1", max_x)), y)
+            p1 = (float(axis.get("x0", min_x - 1500)), y)
+            p2 = (float(axis.get("x1", max_x + 1500)), y)
             msp.add_line(p1, p2, dxfattribs={"layer": LAYER_NAMES["axes"], "linetype": "CENTER"})
-            # Prefer ASCII in R2000 DXF (Cyrillic becomes \\U+XXXX otherwise)
-            name = str(axis.get("name", ""))
-            latin = {"А": "A", "Б": "B", "В": "V", "Г": "G", "Д": "D", "Е": "E"}.get(name, name)
-            t = msp.add_text(
-                latin,
-                height=max(200.0, content_h * 0.015),
-                dxfattribs={"layer": LAYER_NAMES["axes"], "style": "GOST_ST"},
+            if bubble:
+                _add_axis_bubble(
+                    msp,
+                    float(bubble.get("cx", p1[0])),
+                    float(bubble.get("cy", y)),
+                    float(bubble.get("r") or max(180.0, content_h * 0.012)),
+                    name,
+                    content_h,
+                )
+            else:
+                br = max(180.0, content_h * 0.012)
+                _add_axis_bubble(msp, p1[0] - br * 1.2, y, br, name, content_h)
+                _add_axis_bubble(msp, p2[0] + br * 1.2, y, br, name, content_h)
+        elif bubble:
+            _add_axis_bubble(
+                msp,
+                float(bubble["cx"]),
+                float(bubble["cy"]),
+                float(bubble.get("r") or 180.0),
+                name,
+                content_h,
             )
-            t.set_placement((p1[0] - 400, p1[1]))
 
-    # Overall GOST dims only (OCR sizes are plain text labels — avoids chaotic dim chains)
+    # Export ALL dimension roles with GOST extension lines + 45° ticks
     for dim in geometry.get("dimensions") or []:
-        if dim.get("role") not in {"overall_x", "overall_y"}:
+        if "p1" not in dim or "p2" not in dim:
             continue
         p1 = (float(dim["p1"][0]), float(dim["p1"][1]))
         p2 = (float(dim["p2"][0]), float(dim["p2"][1]))
-        offset = max(300.0, min(content_w, content_h) * 0.03)
+        if math.hypot(p2[0] - p1[0], p2[1] - p1[1]) < 50:
+            continue
+        role = str(dim.get("role") or "chain")
+        if role in {"overall_x", "overall_y"}:
+            offset = max(350.0, min(content_w, content_h) * 0.035)
+        else:
+            offset = max(180.0, min(content_w, content_h) * 0.015)
         add_gost_dimension(msp, p1, p2, value_mm=dim.get("value_mm"), offset=offset)
 
     for label in geometry.get("texts") or []:
@@ -142,6 +271,9 @@ def build_dxf(geometry: dict[str, Any], metadata: dict[str, Any], out_path: Path
             height=float(label.get("height") or max(120.0, content_h * 0.012)),
             dxfattribs={"layer": LAYER_NAMES["dims"], "style": "GOST_ST"},
         )
+        rot = float(label.get("rotation") or 0.0)
+        if hasattr(t.dxf, "rotation"):
+            t.dxf.rotation = rot
         t.set_placement((float(pos[0]), float(pos[1])))
 
     # --- Paperspace: GOST frame / stamp for plotting ---

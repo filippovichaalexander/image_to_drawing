@@ -78,12 +78,15 @@ def correlate_dimensions(
         if a["name"]:
             axes_by_name[a["name"]].append(a)
 
-    # Collapse duplicate axis names: average coordinates across sheets
+    # Collapse duplicate named axes; keep unnamed bubble-only axes as-is
     unified_axes: list[dict[str, Any]] = []
     seen: set[str] = set()
     for a in axes_out:
         name = a["name"]
-        if not name or name in seen:
+        if not name:
+            unified_axes.append(a)
+            continue
+        if name in seen:
             continue
         seen.add(name)
         group = axes_by_name[name]

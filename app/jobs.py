@@ -34,6 +34,8 @@ class Job:
     dxf_path: Path | None = None
     package_path: Path | None = None
     scene_path: Path | None = None
+    geometry_path: Path | None = None
+    preview_path: Path | None = None
     created_at: float = field(default_factory=time.time)
 
     def to_public(self) -> dict[str, Any]:
@@ -47,6 +49,7 @@ class Job:
             "scale_warning": self.scale_warning,
             "has_result": self.result_path is not None and self.result_path.exists(),
             "has_dxf": self.dxf_path is not None and self.dxf_path.exists(),
+            "has_preview": self.preview_path is not None and self.preview_path.exists(),
             "format": "dxf",
         }
 

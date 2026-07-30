@@ -32,18 +32,19 @@ def denoise_image(src: Path, dst: Path) -> Path:
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     # Mild denoise without erasing thin ink lines
     denoised = cv2.fastNlMeansDenoising(gray, None, h=8, templateWindowSize=7, searchWindowSize=21)
-    # Adaptive threshold handles uneven scan lighting / gray paper
+    # Adaptive threshold — fix_2: smaller block / lower C keeps more CAD ink
     binary = cv2.adaptiveThreshold(
         denoised,
         255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY,
-        35,
-        10,
+        25,
+        5,
     )
-    # Morphological close to reconnect broken strokes
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+    # Open removes speckles; close reconnects broken strokes (fix_2)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     ok, buf = cv2.imencode(".png", binary)

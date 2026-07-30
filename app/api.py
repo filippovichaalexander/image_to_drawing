@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.config import get_settings
@@ -61,6 +61,8 @@ async def capabilities() -> dict[str, Any]:
     settings = get_settings()
     return {
         "ai_mode": settings.ai_mode,
+        "vectorization_profile": settings.vectorization_profile,
+        "vectorization_auto_profile": settings.vectorization_auto_profile,
         "export_format": "dxf",
     }
 
@@ -78,6 +80,7 @@ async def create_job(
     checked_by: Annotated[str, Form()] = "",
     company: Annotated[str, Form()] = "Мосреставрация",
     scale_mm: Annotated[str | None, Form()] = None,
+    vectorization_profile: Annotated[str | None, Form()] = None,
 ) -> dict:
     if not drawings:
         raise HTTPException(400, detail="Нужен хотя бы один чертёж")
@@ -94,6 +97,7 @@ async def create_job(
             "company": company or "—",
             "sheet_num": "1",
             "scale_mm": scale_mm,
+            "vectorization_profile": vectorization_profile or settings.vectorization_profile,
         }
     )
     job_dir = settings.upload_dir / job.id
@@ -134,12 +138,89 @@ async def get_scene(job_id: str) -> JSONResponse:
     return JSONResponse(data)
 
 
+@router.get("/jobs/{job_id}/raw")
+async def get_raw_geometry(job_id: str) -> JSONResponse:
+    """Raw contours + metrics for live preview filters (no DXF required)."""
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, detail="Задача не найдена")
+    if job.preview_path and job.preview_path.exists():
+        data = json.loads(job.preview_path.read_text(encoding="utf-8"))
+        return JSONResponse(data)
+    if job.geometry_path and job.geometry_path.exists():
+        from app.pipeline.preview import build_preview_payload
+
+        geometry = json.loads(job.geometry_path.read_text(encoding="utf-8"))
+        return JSONResponse(build_preview_payload(geometry))
+    raise HTTPException(404, detail="Предпросмотр ещё не готов")
+
+
+@router.post("/jobs/{job_id}/export")
+async def export_with_filters(
+    job_id: str,
+    body: dict[str, Any] = Body(default_factory=dict),
+) -> dict[str, Any]:
+    """Bake current live filters into DXF (server-side, from cached geometry)."""
+    job = jobs.get(job_id)
+    if not job or not job.geometry_path or not job.geometry_path.exists():
+        raise HTTPException(404, detail="Геометрия ещё не готова")
+
+    settings = get_settings()
+    out_root = settings.results_dir / job_id
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    geometry = json.loads(job.geometry_path.read_text(encoding="utf-8"))
+    preview = None
+    if job.preview_path and job.preview_path.exists():
+        preview = json.loads(job.preview_path.read_text(encoding="utf-8"))
+
+    filters = body.get("filters") if isinstance(body, dict) else None
+    from app.pipeline.preview import apply_filters_to_geometry
+
+    filtered = apply_filters_to_geometry(geometry, filters=filters, preview=preview)
+
+    from app.cad.export import build_dxf
+    from app.cad.package import build_download_package
+    from app.cad.scene import dxf_to_scene
+
+    code = str(job.metadata.get("code", "drawing")).replace("/", "-")
+    out_dxf = out_root / f"{code}.dxf"
+    build_dxf(filtered, job.metadata, out_dxf)
+
+    package_path = out_root / f"{code}_package.zip"
+    build_download_package(out_dxf, package_path, job.metadata)
+    scene = dxf_to_scene(out_dxf)
+    scene_path = out_root / "scene.json"
+    scene_path.write_text(json.dumps(scene, ensure_ascii=False), encoding="utf-8")
+
+    (out_root / "export_filters.json").write_text(
+        json.dumps(filters or {}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    jobs.update(
+        job_id,
+        result_path=out_dxf,
+        dxf_path=out_dxf,
+        package_path=package_path,
+        scene_path=scene_path,
+        step="DXF готов",
+    )
+    return {
+        "status": "ok",
+        "job_id": job_id,
+        "wall_count": len(filtered.get("walls") or []),
+        "download": f"/api/jobs/{job_id}/download",
+        "has_dxf": True,
+    }
+
+
 @router.get("/jobs/{job_id}/download")
 async def download_job(job_id: str) -> FileResponse:
     """Primary download: DXF file."""
     job = jobs.get(job_id)
     if not job or not job.dxf_path or not job.dxf_path.exists():
-        raise HTTPException(404, detail="DXF ещё не готов")
+        raise HTTPException(404, detail="DXF ещё не готов — сначала нажмите «Сгенерировать DXF»")
     return FileResponse(
         path=job.dxf_path,
         filename=job.dxf_path.name,
