@@ -9,6 +9,7 @@
     "04_DIMS_GOST": [0.12, 0.65, 0.28],
     "05_OPENINGS": [0.25, 0.4, 0.95],
     "06_DETAIL": [0.75, 0.78, 0.82],
+    "06_STAIRS": [0.85, 0.75, 0.55],
     "07_HATCH": [0.75, 0.25, 0.7],
   };
 
@@ -21,6 +22,7 @@
     "04_DIMS_GOST": "04_Размеры",
     "05_OPENINGS": "05_Окна_Двери",
     "06_DETAIL": "06_Детали",
+    "06_STAIRS": "06_Лестницы",
     "07_HATCH": "07_Штриховка",
   };
 
@@ -74,6 +76,9 @@
       this.panY = 0;
       this._dragging = false;
       this._last = null;
+      this.underlayOpacity = 0.28;
+      this._underlayImg = null;
+      this._underlayUrl = null;
       this._initGL();
       this._bindInput();
       this._resize();
@@ -236,8 +241,33 @@
         "05_OPENINGS": true,
         "06_DETAIL": true,
       };
+      this._loadUnderlay(raw?.scan_url || raw?.underlay?.url || null);
       this.applyFilters();
       return this.layersOn;
+    }
+
+    setUnderlayOpacity(v) {
+      this.underlayOpacity = Math.max(0, Math.min(1, Number(v) || 0));
+      this.draw();
+    }
+
+    _loadUnderlay(url) {
+      if (!url) {
+        this._underlayImg = null;
+        this._underlayUrl = null;
+        return;
+      }
+      if (url === this._underlayUrl && this._underlayImg) return;
+      this._underlayUrl = url;
+      const img = new Image();
+      img.onload = () => {
+        this._underlayImg = img;
+        this.draw();
+      };
+      img.onerror = () => {
+        this._underlayImg = null;
+      };
+      img.src = url;
     }
 
     setFilter(name, value) {
@@ -328,6 +358,21 @@
           target.push(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]);
         }
       }
+      // Stairs → dedicated stairs layer (not walls)
+      const stairArr = [];
+      if (this.layersOn["06_DETAIL"] !== false) {
+        for (const stair of this.raw.stairs || []) {
+          if (!stair || stair.length < 2) continue;
+          for (let i = 0; i < stair.length - 1; i++) {
+            stairArr.push(stair[i][0], stair[i][1], stair[i + 1][0], stair[i + 1][1]);
+          }
+          if (stair.length > 2) {
+            const a = stair[stair.length - 1];
+            const b = stair[0];
+            stairArr.push(a[0], a[1], b[0], b[1]);
+          }
+        }
+      }
 
       // Axes as simple lines
       const axisArr = [];
@@ -363,9 +408,21 @@
         for (const op of this.raw.openings || []) {
           if (op.leaf && op.leaf.length >= 2) {
             openArr.push(op.leaf[0][0], op.leaf[0][1], op.leaf[1][0], op.leaf[1][1]);
-          } else if (op.p1 && op.p2) {
-            openArr.push(op.p1[0], op.p1[1], op.p2[0], op.p2[1]);
+            continue;
           }
+          if (!op.p1 || !op.p2) continue;
+          const x1 = op.p1[0], y1 = op.p1[1], x2 = op.p2[0], y2 = op.p2[1];
+          const dx = x2 - x1, dy = y2 - y1;
+          const len = Math.hypot(dx, dy) || 1;
+          const ux = dx / len, uy = dy / len;
+          const nx = -uy, ny = ux;
+          let half = Number(op.width_mm);
+          if (!Number.isFinite(half) || half < 40) half = 100;
+          half *= 0.5;
+          // Centerline + two side lines (reads as a thin opening, not a fat box)
+          openArr.push(x1, y1, x2, y2);
+          openArr.push(x1 + nx * half, y1 + ny * half, x2 + nx * half, y2 + ny * half);
+          openArr.push(x1 - nx * half, y1 - ny * half, x2 - nx * half, y2 - ny * half);
         }
       }
 
@@ -375,6 +432,7 @@
 
       const batches = [
         [detailArr, LAYER_COLORS["06_DETAIL"]],
+        [stairArr, LAYER_COLORS["06_STAIRS"]],
         [axisArr, LAYER_COLORS["03_AXES"]],
         [dimArr, LAYER_COLORS["04_DIMS_GOST"]],
         [openArr, LAYER_COLORS["05_OPENINGS"]],
@@ -387,15 +445,24 @@
         gl.drawArrays(gl.LINES, 0, arr.length / 2);
       }
 
-      const texts = (this.raw.texts || []).map((t) => ({
-        type: "text",
-        layer: "04_DIMS_GOST",
-        points: [t.pos || [0, 0]],
-        text: t.text || "",
-        height: t.height || 120,
-        rotation: t.rotation || 0,
-      }));
+      const texts = [];
+      for (const t of this.raw.texts || []) {
+        const kind = String(t.kind || "").toLowerCase();
+        const layer = (kind === "label" || kind === "detail")
+          ? "06_DETAIL"
+          : "04_DIMS_GOST";
+        if (this.layersOn[layer] === false) continue;
+        texts.push({
+          type: "text",
+          layer,
+          points: [t.pos || [0, 0]],
+          text: t.text || "",
+          height: t.height || 120,
+          rotation: t.rotation || 0,
+        });
+      }
       this._drawFills([]);
+      this._drawUnderlay();
       this._drawTexts(texts);
     }
 
@@ -479,6 +546,26 @@
         ctx.fillStyle = `rgba(${Math.round(color[0] * 255)},${Math.round(color[1] * 255)},${Math.round(color[2] * 255)},0.22)`;
         ctx.fill();
       }
+    }
+
+    _drawUnderlay() {
+      const ctx = this.tctx;
+      const img = this._underlayImg;
+      if (!ctx || !img || !this.raw || this.underlayOpacity <= 0.01) return;
+      const ul = this.raw.underlay || {};
+      const b = this.raw.bounds || { min: [0, 0], max: [12000, 8000] };
+      const min = ul.min || b.min || [0, 0];
+      const max = ul.max || b.max || [12000, 8000];
+      // Image Y-down ↔ CAD Y-up: place image top at CAD maxY
+      const [sx0, sy0] = this._worldToScreen(min[0], max[1]);
+      const [sx1, sy1] = this._worldToScreen(max[0], min[1]);
+      const w = sx1 - sx0;
+      const h = sy1 - sy0;
+      if (Math.abs(w) < 2 || Math.abs(h) < 2) return;
+      ctx.save();
+      ctx.globalAlpha = this.underlayOpacity;
+      ctx.drawImage(img, sx0, sy0, w, h);
+      ctx.restore();
     }
 
     _drawTexts(texts) {

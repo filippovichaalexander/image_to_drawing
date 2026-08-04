@@ -159,10 +159,19 @@ def build_preview_payload(geometry: dict[str, Any]) -> dict[str, Any]:
         "dimensions": geometry.get("dimensions") or [],
         "texts": geometry.get("texts") or [],
         "circles": geometry.get("circles") or [],
+        "stairs": geometry.get("stairs") or [],
+        "underlay": geometry.get("underlay"),
         "bounds": _bounds_from_points(all_pts),
+        "drawing_type": geometry.get("drawing_type"),
+        "drawing_type_label": geometry.get("drawing_type_label"),
+        "drawing_note": geometry.get("drawing_note"),
+        "drawing_type_policy": geometry.get("drawing_type_policy"),
+        "yolo_openings_enabled": geometry.get("yolo_openings_enabled"),
         "counts": {
             "contours": len(contours),
             "walls_default": sum(1 for c in contours if c["included_default"] and c["kind"] == "wall"),
+            "stairs": len(geometry.get("stairs") or []),
+            "openings": len(geometry.get("openings") or []),
         },
     }
 

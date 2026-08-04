@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     ai_mode: str = "stub"
     vectorization_profile: str = "default"
     vectorization_auto_profile: bool = True
+    # Optional SAM refine on YOLO openings/stairs (requires weights + segment-anything)
+    use_sam: bool = False
 
     @property
     def max_upload_bytes(self) -> int:

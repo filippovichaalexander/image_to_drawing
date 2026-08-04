@@ -59,11 +59,18 @@ async def _save_uploads(
 @router.get("/capabilities")
 async def capabilities() -> dict[str, Any]:
     settings = get_settings()
+    from app.pipeline.drawing_type import DRAWING_TYPES
+
     return {
         "ai_mode": settings.ai_mode,
         "vectorization_profile": settings.vectorization_profile,
         "vectorization_auto_profile": settings.vectorization_auto_profile,
+        "use_sam": settings.use_sam,
         "export_format": "dxf",
+        "drawing_types": [
+            {"id": k, "label": v["label_ru"], "note": v["note"]}
+            for k, v in DRAWING_TYPES.items()
+        ],
     }
 
 
@@ -81,11 +88,18 @@ async def create_job(
     company: Annotated[str, Form()] = "Мосреставрация",
     scale_mm: Annotated[str | None, Form()] = None,
     vectorization_profile: Annotated[str | None, Form()] = None,
+    use_sam: Annotated[str | None, Form()] = None,
+    drawing_type: Annotated[str | None, Form()] = None,
+    drawing_note: Annotated[str | None, Form()] = None,
 ) -> dict:
     if not drawings:
         raise HTTPException(400, detail="Нужен хотя бы один чертёж")
 
     settings = get_settings()
+    sam_flag = str(use_sam or "").lower() in {"1", "true", "on", "yes"}
+    from app.pipeline.drawing_type import resolve_drawing_type
+
+    dtype = resolve_drawing_type(drawing_type, drawing_note)
     job = jobs.create(
         metadata={
             "object_name": object_name or "Объект",
@@ -98,6 +112,8 @@ async def create_job(
             "sheet_num": "1",
             "scale_mm": scale_mm,
             "vectorization_profile": vectorization_profile or settings.vectorization_profile,
+            "use_sam": sam_flag if use_sam is not None else bool(settings.use_sam),
+            **dtype,
         }
     )
     job_dir = settings.upload_dir / job.id
@@ -146,13 +162,45 @@ async def get_raw_geometry(job_id: str) -> JSONResponse:
         raise HTTPException(404, detail="Задача не найдена")
     if job.preview_path and job.preview_path.exists():
         data = json.loads(job.preview_path.read_text(encoding="utf-8"))
+        if "scan_url" not in data:
+            data["scan_url"] = f"/api/jobs/{job_id}/scan"
         return JSONResponse(data)
     if job.geometry_path and job.geometry_path.exists():
         from app.pipeline.preview import build_preview_payload
 
         geometry = json.loads(job.geometry_path.read_text(encoding="utf-8"))
-        return JSONResponse(build_preview_payload(geometry))
+        data = build_preview_payload(geometry)
+        data["scan_url"] = f"/api/jobs/{job_id}/scan"
+        return JSONResponse(data)
     raise HTTPException(404, detail="Предпросмотр ещё не готов")
+
+
+@router.get("/jobs/{job_id}/scan")
+async def get_job_scan(job_id: str) -> FileResponse:
+    """Original first drawing sheet for preview underlay compare."""
+    job = jobs.get(job_id)
+    if not job or not job.drawing_paths:
+        raise HTTPException(404, detail="Скан не найден")
+    path = job.drawing_paths[0]
+    if not path.exists():
+        raise HTTPException(404, detail="Файл скана отсутствует")
+    media = "image/jpeg"
+    suf = path.suffix.lower()
+    if suf == ".png":
+        media = "image/png"
+    elif suf in {".tif", ".tiff"}:
+        media = "image/tiff"
+    elif suf == ".pdf":
+        # Prefer rasterized sheet from results if present
+        settings = get_settings()
+        raster = settings.results_dir / job_id / "sheets"
+        candidates = sorted(raster.glob("*.png")) + sorted(raster.glob("*.jpg"))
+        if candidates:
+            path = candidates[0]
+            media = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+        else:
+            raise HTTPException(404, detail="PDF ещё не растеризован для подложки")
+    return FileResponse(path, media_type=media, filename=path.name)
 
 
 @router.post("/jobs/{job_id}/export")

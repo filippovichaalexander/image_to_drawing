@@ -160,6 +160,10 @@
       input.addEventListener("input", () => {
         if (valueSpan) valueSpan.textContent = input.value;
         if (!state.viewer) return;
+        if (input.id === "underlay-opacity") {
+          state.viewer.setUnderlayOpacity(parseFloat(input.value));
+          return;
+        }
         const name = input.id.replace("filter-", "");
         state.viewer.setFilter(name, parseFloat(input.value));
         updateFilterStats();
@@ -183,6 +187,10 @@
     requestAnimationFrame(() => state.viewer?._resize?.());
     updateFilterStats();
     if (exportBtn) exportBtn.disabled = false;
+    if (raw.drawing_type_label) {
+      const yolo = raw.yolo_openings_enabled === false ? "YOLO-проёмы выкл." : "YOLO-проёмы вкл.";
+      setStatus(`Тип: ${raw.drawing_type_label}. ${yolo}`, "ok");
+    }
   }
 
   async function pollJob(jobId) {

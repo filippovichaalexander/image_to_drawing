@@ -118,6 +118,15 @@ def build_dxf(geometry: dict[str, Any], metadata: dict[str, Any], out_path: Path
         if len(pts) >= 2:
             msp.add_lwpolyline(pts, dxfattribs={"layer": LAYER_NAMES["detail"]})
 
+    for poly in geometry.get("stairs") or []:
+        pts = [(float(p[0]), float(p[1])) for p in poly]
+        if len(pts) >= 2:
+            msp.add_lwpolyline(
+                pts,
+                close=len(pts) >= 3,
+                dxfattribs={"layer": LAYER_NAMES.get("stairs", LAYER_NAMES["detail"])},
+            )
+
     for poly in geometry.get("hatches") or []:
         pts = [(float(p[0]), float(p[1])) for p in poly]
         if len(pts) >= 2:
@@ -146,58 +155,47 @@ def build_dxf(geometry: dict[str, Any], metadata: dict[str, Any], out_path: Path
             continue
         if "p1" not in opening or "p2" not in opening:
             continue
-        x0, x1 = sorted((float(opening["p1"][0]), float(opening["p2"][0])))
-        y0, y1 = sorted((float(opening["p1"][1]), float(opening["p2"][1])))
-        # Keep rectangle with visible width (expand thin boxes)
-        if abs(x1 - x0) < 30:
-            mid = (x0 + x1) / 2
-            x0, x1 = mid - 40, mid + 40
-        if abs(y1 - y0) < 30:
-            mid = (y0 + y1) / 2
-            y0, y1 = mid - 40, mid + 40
-        # Diagonal door leaf (not axis-aligned box)
-        dx = abs(float(opening["p2"][0]) - float(opening["p1"][0]))
-        dy = abs(float(opening["p2"][1]) - float(opening["p1"][1]))
-        if kind == "door" and min(dx, dy) > 0.2 * max(dx, dy, 1):
-            msp.add_line(
-                (float(opening["p1"][0]), float(opening["p1"][1])),
-                (float(opening["p2"][0]), float(opening["p2"][1])),
-                dxfattribs={"layer": LAYER_NAMES["openings"]},
-            )
-            continue
-        msp.add_lwpolyline(
-            [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)],
-            dxfattribs={"layer": LAYER_NAMES["openings"]},
-        )
+        x1, y1 = float(opening["p1"][0]), float(opening["p1"][1])
+        x2, y2 = float(opening["p2"][0]), float(opening["p2"][1])
+        dx = x2 - x1
+        dy = y2 - y1
+        length = math.hypot(dx, dy) or 1.0
+        ux, uy = dx / length, dy / length
+        # Thickness across the opening (wall depth), not a fat YOLO AABB
+        width = float(opening.get("width_mm") or 0.0)
+        if width < 40:
+            width = 120.0 if kind == "window" else 80.0
+        half = width * 0.5
+        nx, ny = -uy, ux
+        # Rectangle along centerline
+        corners = [
+            (x1 + nx * half, y1 + ny * half),
+            (x2 + nx * half, y2 + ny * half),
+            (x2 - nx * half, y2 - ny * half),
+            (x1 - nx * half, y1 - ny * half),
+            (x1 + nx * half, y1 + ny * half),
+        ]
+        msp.add_lwpolyline(corners, dxfattribs={"layer": LAYER_NAMES["openings"]})
         if kind == "door":
-            # Swing arc approximation from hinge at (x0,y0)
-            r = max(abs(x1 - x0), abs(y1 - y0), 200.0)
+            # Swing arc from hinge at p1
+            r = max(length, 200.0)
             msp.add_arc(
-                center=(x0, y0),
+                center=(x1, y1),
                 radius=r,
                 start_angle=0,
                 end_angle=90,
                 dxfattribs={"layer": LAYER_NAMES["openings"]},
             )
-            msp.add_line((x0, y0), (x0 + r, y0), dxfattribs={"layer": LAYER_NAMES["openings"]})
+            msp.add_line((x1, y1), (x1 + r * ux, y1 + r * uy), dxfattribs={"layer": LAYER_NAMES["openings"]})
         elif kind == "window":
-            # Triple line window symbol inside the opening
-            mid_y = (y0 + y1) / 2
-            mid_x = (x0 + x1) / 2
-            if abs(x1 - x0) >= abs(y1 - y0):
-                for dy_off in (-(y1 - y0) * 0.2, 0.0, (y1 - y0) * 0.2):
-                    msp.add_line(
-                        (x0, mid_y + dy_off),
-                        (x1, mid_y + dy_off),
-                        dxfattribs={"layer": LAYER_NAMES["openings"]},
-                    )
-            else:
-                for dx_off in (-(x1 - x0) * 0.2, 0.0, (x1 - x0) * 0.2):
-                    msp.add_line(
-                        (mid_x + dx_off, y0),
-                        (mid_x + dx_off, y1),
-                        dxfattribs={"layer": LAYER_NAMES["openings"]},
-                    )
+            # Triple line along the opening (GOST-ish window symbol)
+            for frac in (-0.35, 0.0, 0.35):
+                ox, oy = nx * half * frac, ny * half * frac
+                msp.add_line(
+                    (x1 + ox, y1 + oy),
+                    (x2 + ox, y2 + oy),
+                    dxfattribs={"layer": LAYER_NAMES["openings"]},
+                )
 
     for axis in geometry.get("axes") or []:
         name = str(axis.get("name", ""))
@@ -266,10 +264,12 @@ def build_dxf(geometry: dict[str, Any], metadata: dict[str, Any], out_path: Path
 
     for label in geometry.get("texts") or []:
         pos = label.get("pos") or [0, 0]
+        kind = str(label.get("kind") or "dimension").lower()
+        layer = LAYER_NAMES["dims"] if kind == "dimension" else LAYER_NAMES["detail"]
         t = msp.add_text(
             str(label.get("text", "")),
             height=float(label.get("height") or max(120.0, content_h * 0.012)),
-            dxfattribs={"layer": LAYER_NAMES["dims"], "style": "GOST_ST"},
+            dxfattribs={"layer": layer, "style": "GOST_ST"},
         )
         rot = float(label.get("rotation") or 0.0)
         if hasattr(t.dxf, "rotation"):

@@ -10,12 +10,13 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # Fallback when checkpoint has custom ids but no readable names.
+# Must match training taxonomy: wall, door, window, stair, partition.
 FLOORPLAN_CLASS_MAP = {
     0: "wall",
     1: "door",
     2: "window",
     3: "stair",
-    4: "axis",
+    4: "partition",
 }
 
 _WALL_ALIASES = {"wall", "walls", "partition", "partitions", "стена", "стены"}
@@ -62,8 +63,6 @@ def load_model():
 
 def _normalize_class(name: str) -> str | None:
     key = (name or "").strip().lower()
-    if key in _WALL_ALIASES or "wall" in key:
-        return "wall"
     if key in _DOOR_ALIASES or "door" in key:
         return "door"
     if key in _WINDOW_ALIASES or "window" in key:
@@ -72,7 +71,55 @@ def _normalize_class(name: str) -> str | None:
         return "stair"
     if key in _AXIS_ALIASES or "axis" in key:
         return "axis"
+    if key in _WALL_ALIASES or "wall" in key or "partition" in key:
+        return "wall"
     return None
+
+
+def _bbox_to_opening_span(
+    x1: float, y1: float, x2: float, y2: float
+) -> tuple[list[float], list[float], float]:
+    """Turn an axis-aligned detection box into an opening centerline + thickness.
+
+    YOLO returns opposite corners; drawing that diagonal / fat AABB misplaces
+    windows on the plan. Prefer the long-axis mid-line (how openings sit in walls).
+    """
+    xa, xb = sorted((float(x1), float(x2)))
+    ya, yb = sorted((float(y1), float(y2)))
+    w = max(xb - xa, 1.0)
+    h = max(yb - ya, 1.0)
+    cx = 0.5 * (xa + xb)
+    cy = 0.5 * (ya + yb)
+    if w >= h:
+        return [xa, cy], [xb, cy], h
+    return [cx, ya], [cx, yb], w
+
+
+def _plausible_opening_box(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    orig_w: int,
+    orig_h: int,
+    kind: str,
+) -> bool:
+    """Reject huge / near-square blobs that are usually mislabeled walls."""
+    w = abs(float(x2) - float(x1))
+    h = abs(float(y2) - float(y1))
+    if w < 2 or h < 2:
+        return False
+    area = w * h
+    img_area = max(float(orig_w) * float(orig_h), 1.0)
+    # Windows/doors are local features — not half the sheet
+    max_frac = 0.08 if kind == "window" else 0.12
+    if area / img_area > max_frac:
+        return False
+    aspect = max(w, h) / max(min(w, h), 1.0)
+    # Opening symbols are usually elongated along the wall
+    if kind == "window" and aspect < 1.35 and area / img_area > 0.01:
+        return False
+    return True
 
 
 def _class_name_for(model, cls_id: int, prefer_named: bool) -> str:
@@ -91,7 +138,7 @@ def segment_floorplan(
     image_path: Path,
     orig_h: int,
     orig_w: int,
-    conf: float = 0.25,
+    conf: float = 0.40,
     imgsz: int = 640,
 ) -> dict[str, Any]:
     """
@@ -112,7 +159,7 @@ def segment_floorplan(
         str(image_path),
         imgsz=imgsz,
         conf=conf,
-        iou=0.5,
+        iou=0.45,
         verbose=False,
     )
 
@@ -149,21 +196,41 @@ def segment_floorplan(
                 output["walls"].append(pts)
             elif cls_name == "door" and boxes is not None and i < len(boxes.xyxy):
                 x1, y1, x2, y2 = [float(v) for v in boxes.xyxy[i].tolist()]
+                score = float(boxes.conf[i].item()) if boxes.conf is not None and i < len(boxes.conf) else 1.0
+                if score < max(conf, 0.35):
+                    continue
+                if not _plausible_opening_box(x1, y1, x2, y2, yolo_w, yolo_h, "door"):
+                    continue
+                p1, p2, thickness = _bbox_to_opening_span(x1, y1, x2, y2)
                 output["doors"].append(
                     {
-                        "p1": [x1 * fx, y1 * fy],
-                        "p2": [x2 * fx, y2 * fy],
-                        "center": [(x1 + x2) / 2 * fx, (y1 + y2) / 2 * fy],
+                        "p1": [p1[0] * fx, p1[1] * fy],
+                        "p2": [p2[0] * fx, p2[1] * fy],
+                        "center": [
+                            0.5 * (p1[0] + p2[0]) * fx,
+                            0.5 * (p1[1] + p2[1]) * fy,
+                        ],
+                        "width_px": float(thickness) * 0.5 * (fx + fy),
                         "kind": "door",
+                        "conf": score,
                     }
                 )
             elif cls_name == "window" and boxes is not None and i < len(boxes.xyxy):
                 x1, y1, x2, y2 = [float(v) for v in boxes.xyxy[i].tolist()]
+                score = float(boxes.conf[i].item()) if boxes.conf is not None and i < len(boxes.conf) else 1.0
+                # Windows need higher confidence — industrial plans create many FPs
+                if score < max(conf, 0.45):
+                    continue
+                if not _plausible_opening_box(x1, y1, x2, y2, yolo_w, yolo_h, "window"):
+                    continue
+                p1, p2, thickness = _bbox_to_opening_span(x1, y1, x2, y2)
                 output["windows"].append(
                     {
-                        "p1": [x1 * fx, y1 * fy],
-                        "p2": [x2 * fx, y2 * fy],
+                        "p1": [p1[0] * fx, p1[1] * fy],
+                        "p2": [p2[0] * fx, p2[1] * fy],
+                        "width_px": float(thickness) * 0.5 * (fx + fy),
                         "kind": "window",
+                        "conf": score,
                     }
                 )
             elif cls_name == "stair":

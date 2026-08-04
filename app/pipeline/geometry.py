@@ -21,14 +21,20 @@ def extract_geometry(
     source_images: list[Path] | None = None,
     vectorization_profile: str = "default",
     vectorization_auto_profile: bool = True,
+    use_sam: bool = False,
+    use_yolo_openings: bool | None = None,
+    use_yolo_stairs: bool = True,
+    drawing_type: str = "",
 ) -> dict[str, Any]:
     """
     Prefer drawing-faithful exact-trace (contours / lines / arcs / circles).
 
     Semantic AI (YOLO) is used only inside exact-trace for optional opening
     classification. Stub / full OpenCV+YOLO paths remain as fallback.
+    Optional SAM refines YOLO stair/opening masks when weights are present.
     """
     sources = list(source_images or cleaned_images)
+    yolo_openings = (ai_mode == "full") if use_yolo_openings is None else bool(use_yolo_openings)
 
     # Primary path: reproduce the scan as DXF primitives
     try:
@@ -36,10 +42,14 @@ def extract_geometry(
 
         traced = extract_exact_trace(
             sources,
-            use_yolo_openings=(ai_mode == "full"),
+            use_yolo_openings=yolo_openings,
+            use_yolo_stairs=bool(use_yolo_stairs),
             vectorization_profile=vectorization_profile,
             vectorization_auto_profile=vectorization_auto_profile,
+            use_sam=use_sam and (yolo_openings or bool(use_yolo_stairs)),
         )
+        if drawing_type:
+            traced["drawing_type"] = drawing_type
         if _wall_segment_count(traced) >= 1 or traced.get("strokes") or traced.get("details"):
             return traced
         logger.warning("exact_trace returned empty geometry; falling back")

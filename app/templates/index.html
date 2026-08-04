@@ -77,6 +77,26 @@
           <label id="scale-hint">Контрольный отрезок (мм)
             <input name="scale_mm" type="number" min="1" step="1" placeholder="обязателен, если OCR неуверен">
           </label>
+          <label>Тип чертежа (влияет на YOLO проёмы)
+            <select name="drawing_type" id="drawing-type">
+              <option value="floor_plan" selected>План здания / этажа (building plan)</option>
+              <option value="cottage_plan">План коттеджа / этажа (cottage / storey plan)</option>
+              <option value="industrial_plan">Промплан / цех (без окон)</option>
+              <option value="facade">Фасад (facade)</option>
+              <option value="building_cut">Разрез здания (building cut)</option>
+              <option value="wall_cut">Разрез стены / узел (wall cut)</option>
+              <option value="stair_fragment">Фрагмент лестницы</option>
+              <option value="other">Другое / не уверен</option>
+            </select>
+          </label>
+          <label>Краткое описание (необязательно)
+            <input name="drawing_note" type="text" maxlength="200"
+              placeholder='напр. "2nd storey cottage plan" или "wall cut"'>
+          </label>
+          <p class="hint" id="drawing-type-help">
+            Тип отключает ложные окна на промпланах/фасадах/узлах. Описание уточняет тип по ключевым словам,
+            если выбран «Другое».
+          </p>
           <label>Профиль векторизации стен
             <select name="vectorization_profile">
               <option value="default" selected>Стандартный (ГОСТ, авто-подбор при необходимости)</option>
@@ -85,6 +105,10 @@
               <option value="thick_lines">Толстые линии</option>
               <option value="high_detail">Много деталей</option>
             </select>
+          </label>
+          <label style="flex-direction:row;align-items:center;gap:0.5rem;">
+            <input type="checkbox" name="use_sam" value="true">
+            SAM-уточнение YOLO (лестницы/проёмы; нужен models/sam_vit_b.pth)
           </label>
           <p class="hint" id="scale-help">
             Приложение читает размерные надписи и привязывает их к длине цепочки на плане.
@@ -121,7 +145,7 @@
       <div class="viewer-layout">
         <aside class="filter-panel" id="filter-panel" hidden>
           <h3>Настройка стен (live)</h3>
-          <p class="hint">Фильтр применяется в браузере к уже извлечённым контурам.</p>
+          <p class="hint">Эти ползунки фильтруют только контуры <strong>стен</strong> (01). Окна/двери (05) — от YOLO; их скрывает галочка слоя, не эти слайдеры.</p>
           <label>
             Толщина линии min (med_t)
             <input type="range" id="filter-med_t_min" min="0.1" max="2.0" step="0.05" value="0.55">
@@ -151,6 +175,11 @@
             Мин. длина (мм)
             <input type="range" id="filter-min_length" min="50" max="2000" step="10" value="200">
             <span id="filter-min_length-value">200</span>
+          </label>
+          <label>
+            Подложка оригинала
+            <input type="range" id="underlay-opacity" min="0" max="0.7" step="0.05" value="0.28">
+            <span id="underlay-opacity-value">0.28</span>
           </label>
           <p class="hint" id="filter-stats">Стен в предпросмотре: —</p>
         </aside>

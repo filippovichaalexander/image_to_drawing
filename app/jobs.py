@@ -50,6 +50,7 @@ class Job:
             "has_result": self.result_path is not None and self.result_path.exists(),
             "has_dxf": self.dxf_path is not None and self.dxf_path.exists(),
             "has_preview": self.preview_path is not None and self.preview_path.exists(),
+            "scan_url": f"/api/jobs/{self.id}/scan" if self.drawing_paths else None,
             "format": "dxf",
         }
 

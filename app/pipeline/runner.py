@@ -40,13 +40,39 @@ def run_pipeline(job_id: str) -> None:
 
         jobs.update(job_id, progress=28, step="Распознавание геометрии / OCR…")
         from app.pipeline.geometry import extract_geometry
+        from app.pipeline.drawing_type import resolve_drawing_type
+
+        dtype = resolve_drawing_type(
+            job.metadata.get("drawing_type"),
+            job.metadata.get("drawing_note"),
+        )
+        # Prefer user vectorization profile; if still default, allow type hint
+        profile = str(job.metadata.get("vectorization_profile") or settings.vectorization_profile)
+        if profile == "default" and dtype.get("prefer_profile"):
+            profile = str(dtype["prefer_profile"])
+
+        use_yolo = settings.ai_mode == "full" and bool(dtype.get("use_yolo_openings"))
+        use_sam = bool(job.metadata.get("use_sam", settings.use_sam)) and use_yolo
 
         geometry = extract_geometry(
             cleaned,
             ai_mode=settings.ai_mode,
             source_images=sheet_paths,
-            vectorization_profile=str(job.metadata.get("vectorization_profile") or settings.vectorization_profile),
+            vectorization_profile=profile,
             vectorization_auto_profile=bool(settings.vectorization_auto_profile),
+            use_sam=use_sam,
+            use_yolo_openings=use_yolo,
+            use_yolo_stairs=bool(dtype.get("use_yolo_stairs")) and settings.ai_mode == "full",
+            drawing_type=str(dtype.get("drawing_type") or ""),
+        )
+        geometry["drawing_type"] = dtype.get("drawing_type")
+        geometry["drawing_type_label"] = dtype.get("drawing_type_label")
+        geometry["drawing_note"] = dtype.get("drawing_note")
+        geometry["drawing_type_policy"] = dtype.get("policy_note")
+        geometry["yolo_openings_enabled"] = use_yolo
+        jobs.update(
+            job_id,
+            step=f"Геометрия… ({dtype.get('drawing_type_label') or 'план'})",
         )
         needs_scale = bool(geometry.get("needs_scale")) and not job.metadata.get("scale_mm")
         jobs.update(
@@ -62,11 +88,16 @@ def run_pipeline(job_id: str) -> None:
                 dims = geometry.get("dimensions") or []
                 if dims and dims[0].get("value_mm"):
                     factor = target / float(dims[0]["value_mm"])
-                    for key in ("walls", "partitions", "details", "strokes", "hatches"):
+                    for key in ("walls", "partitions", "details", "strokes", "hatches", "stairs"):
                         for poly in geometry.get(key) or []:
                             for p in poly:
                                 p[0] *= factor
                                 p[1] *= factor
+                    if geometry.get("underlay"):
+                        ul = geometry["underlay"]
+                        for k in ("min", "max"):
+                            if ul.get(k):
+                                ul[k] = [float(ul[k][0]) * factor, float(ul[k][1]) * factor]
                     for op in geometry.get("openings") or []:
                         for k in ("p1", "p2"):
                             if k in op:
@@ -138,6 +169,10 @@ def run_pipeline(job_id: str) -> None:
         from app.pipeline.preview import build_preview_payload
 
         preview = build_preview_payload(geometry)
+        # Attach scan underlay URL for client compare
+        preview["scan_url"] = f"/api/jobs/{job_id}/scan"
+        if geometry.get("underlay"):
+            preview["underlay"] = geometry["underlay"]
         preview_path = out_root / "preview.json"
         preview_path.write_text(
             json.dumps(preview, ensure_ascii=False),

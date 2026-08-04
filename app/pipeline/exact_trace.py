@@ -23,6 +23,177 @@ MAX_TRACE_SIDE = 2400
 DEFAULT_SPAN_MM = 12000.0
 
 
+def _classify_text_kind(text: str) -> str:
+    """dimension = numeric size labels; label = room names / misc OCR."""
+    cleaned = (
+        str(text or "")
+        .lower()
+        .replace(" ", "")
+        .replace(",", "")
+        .replace(".", "")
+        .replace("мм", "")
+        .replace("mm", "")
+        .replace("±", "")
+    )
+    if cleaned.isdigit() and len(cleaned) >= 2:
+        return "dimension"
+    return "label"
+
+
+def _poly_centroid(poly: list[list[float]]) -> tuple[float, float]:
+    if not poly:
+        return 0.0, 0.0
+    xs = [float(p[0]) for p in poly]
+    ys = [float(p[1]) for p in poly]
+    return sum(xs) / len(xs), sum(ys) / len(ys)
+
+
+def _poly_length(poly: list[list[float]]) -> float:
+    if len(poly) < 2:
+        return 0.0
+    return float(
+        sum(
+            math.hypot(poly[i + 1][0] - poly[i][0], poly[i + 1][1] - poly[i][1])
+            for i in range(len(poly) - 1)
+        )
+    )
+
+
+def _reject_ocr_coincident_walls(
+    wall_polys: list[list[list[float]]],
+    ocr_labs: list[dict[str, Any]],
+    *,
+    up: float,
+    max_len_px: float = 90.0,
+    pad_px: float = 18.0,
+) -> tuple[list[list[list[float]]], int]:
+    """Drop short wall candidates whose centroid sits on OCR digit boxes."""
+    if not wall_polys or not ocr_labs:
+        return wall_polys, 0
+    boxes: list[tuple[float, float, float, float]] = []
+    for lab in ocr_labs:
+        text = str(lab.get("text") or lab.get("value_mm") or "")
+        if _classify_text_kind(text) != "dimension":
+            continue
+        cx = float(lab.get("cx") or 0.0) / max(up, 1e-9)
+        cy = float(lab.get("cy") or 0.0) / max(up, 1e-9)
+        # Prefer bbox when present; else a small pad around center
+        if lab.get("x0") is not None and lab.get("x1") is not None:
+            x0 = float(lab["x0"]) / max(up, 1e-9) - pad_px
+            y0 = float(lab.get("y0", cy - pad_px)) / max(up, 1e-9) - pad_px
+            x1 = float(lab["x1"]) / max(up, 1e-9) + pad_px
+            y1 = float(lab.get("y1", cy + pad_px)) / max(up, 1e-9) + pad_px
+        else:
+            x0, y0, x1, y1 = cx - pad_px, cy - pad_px, cx + pad_px, cy + pad_px
+        boxes.append((x0, y0, x1, y1))
+    if not boxes:
+        return wall_polys, 0
+
+    kept: list[list[list[float]]] = []
+    rejected = 0
+    for poly in wall_polys:
+        length = _poly_length(poly)
+        if length > max_len_px:
+            kept.append(poly)
+            continue
+        cx, cy = _poly_centroid(poly)
+        hit = any(x0 <= cx <= x1 and y0 <= cy <= y1 for x0, y0, x1, y1 in boxes)
+        if hit:
+            rejected += 1
+            continue
+        kept.append(poly)
+    return kept, rejected
+
+
+def _poly_bbox(poly: list[list[float]]) -> tuple[float, float, float, float]:
+    xs = [p[0] for p in poly]
+    ys = [p[1] for p in poly]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _bbox_iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+    iw, ih = max(0.0, ix1 - ix0), max(0.0, iy1 - iy0)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(0.0, ax1 - ax0) * max(0.0, ay1 - ay0)
+    area_b = max(0.0, bx1 - bx0) * max(0.0, by1 - by0)
+    return inter / max(area_a + area_b - inter, 1e-9)
+
+
+def _strip_walls_overlapping_stairs(
+    walls: list[list[list[float]]],
+    stairs: list[list[list[float]]],
+    iou_thr: float = 0.35,
+) -> list[list[list[float]]]:
+    if not stairs:
+        return walls
+    stair_boxes = [_poly_bbox(s) for s in stairs if len(s) >= 3]
+    if not stair_boxes:
+        return walls
+    out: list[list[list[float]]] = []
+    for w in walls:
+        if len(w) < 2:
+            continue
+        wb = _poly_bbox(w)
+        if any(_bbox_iou(wb, sb) >= iou_thr for sb in stair_boxes):
+            continue
+        out.append(w)
+    return out
+
+
+def _point_to_seg_dist(
+    px: float, py: float, ax: float, ay: float, bx: float, by: float
+) -> float:
+    dx, dy = bx - ax, by - ay
+    den = dx * dx + dy * dy
+    if den < 1e-9:
+        return math.hypot(px - ax, py - ay)
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / den))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def _filter_openings_near_walls(
+    openings: list[dict[str, Any]],
+    walls: list[list[list[float]]],
+    partitions: list[list[list[float]]] | None = None,
+    max_dist_mm: float = 350.0,
+) -> list[dict[str, Any]]:
+    """Keep YOLO doors/windows only if they sit on/near traced wall lines.
+
+    Industrial plans (columns, equipment) create many false openings; without a
+    nearby wall stroke they are almost always wrong.
+    """
+    segs: list[tuple[float, float, float, float]] = []
+    for poly in list(walls or []) + list(partitions or []):
+        if len(poly) < 2:
+            continue
+        for i in range(len(poly) - 1):
+            a, b = poly[i], poly[i + 1]
+            segs.append((float(a[0]), float(a[1]), float(b[0]), float(b[1])))
+    if not segs:
+        # No walls yet — drop semantic openings (keep CV arcs/leaves with arc/leaf)
+        return [op for op in openings if op.get("arc") or op.get("leaf")]
+
+    kept: list[dict[str, Any]] = []
+    for op in openings:
+        if op.get("arc") or op.get("leaf"):
+            kept.append(op)
+            continue
+        if "p1" not in op or "p2" not in op:
+            continue
+        mx = 0.5 * (float(op["p1"][0]) + float(op["p2"][0]))
+        my = 0.5 * (float(op["p1"][1]) + float(op["p2"][1]))
+        dist = min(_point_to_seg_dist(mx, my, *s) for s in segs)
+        if dist <= max_dist_mm:
+            kept.append(op)
+    return kept
+
+
 @dataclass(frozen=True)
 class WallVectorProfile:
     name: str
@@ -589,66 +760,55 @@ def _build_dim_chains(
     sy: float,
     up: float,
 ) -> list[dict[str, Any]]:
-    """Turn OCR labels into GOST dimension segments (horizontal / vertical chains)."""
+    """Place dimension segments from OCR text boxes (not invented lengths).
+
+    Older logic spanned ±value_mm/2 around the glyph center. That puts green
+    ticks in the wrong place vs the scan: OCR text is right, lines are wrong.
+    Use the OCR bounding box long axis instead (approx. where the printed
+    dimension sits).
+    """
     dims: list[dict[str, Any]] = []
-    usable = []
     for lab in labels:
         v = int(lab.get("value_mm") or 0)
         if v < 200 or bool(lab.get("is_area")):
             continue
         ocr_scale = float(lab.get("ocr_scale") or 1.0)
-        cx = float(lab["cx"]) / ocr_scale / up
-        cy = float(lab["cy"]) / ocr_scale / up
-        usable.append({**lab, "cx_px": cx, "cy_px": cy, "value_mm": v})
-
-    # Cluster by Y for horizontal chains and by X for vertical
-    for axis, key in (("h", "cy_px"), ("v", "cx_px")):
-        items = sorted(usable, key=lambda t: t[key])
-        clusters: list[list[dict[str, Any]]] = []
-        band = 28.0
-        for lab in items:
-            if not clusters or abs(lab[key] - clusters[-1][-1][key]) > band:
-                clusters.append([lab])
-            else:
-                clusters[-1].append(lab)
-        for cl in clusters:
-            if len(cl) < 1:
-                continue
-            # Sort along chain direction
-            if axis == "h":
-                cl = sorted(cl, key=lambda t: t["cx_px"])
-                y = float(np.median([t["cy_px"] for t in cl]))
-                for lab in cl:
-                    half = (lab["value_mm"] / sx) * 0.5
-                    p1 = _px_to_mm(lab["cx_px"] - half, y, sh, sx, sy)
-                    p2 = _px_to_mm(lab["cx_px"] + half, y, sh, sx, sy)
-                    dims.append(
-                        {
-                            "p1": p1,
-                            "p2": p2,
-                            "value_mm": lab["value_mm"],
-                            "role": "chain",
-                            "orient": "h",
-                            "source": "ocr_chain",
-                        }
-                    )
-            else:
-                cl = sorted(cl, key=lambda t: t["cy_px"])
-                x = float(np.median([t["cx_px"] for t in cl]))
-                for lab in cl:
-                    half = (lab["value_mm"] / sy) * 0.5
-                    p1 = _px_to_mm(x, lab["cy_px"] - half, sh, sx, sy)
-                    p2 = _px_to_mm(x, lab["cy_px"] + half, sh, sx, sy)
-                    dims.append(
-                        {
-                            "p1": p1,
-                            "p2": p2,
-                            "value_mm": lab["value_mm"],
-                            "role": "chain",
-                            "orient": "v",
-                            "source": "ocr_chain",
-                        }
-                    )
+        box = lab.get("box")
+        if not box or len(box) < 2:
+            continue
+        xs = [float(p[0]) / ocr_scale / up for p in box]
+        ys = [float(p[1]) / ocr_scale / up for p in box]
+        cx = float(sum(xs) / len(xs))
+        cy = float(sum(ys) / len(ys))
+        w = max(xs) - min(xs)
+        h = max(ys) - min(ys)
+        # Prefer elongated text boxes; skip near-square (room areas etc.)
+        if max(w, h) < 8:
+            continue
+        if w >= h:
+            # Horizontal dim label — line along text baseline
+            y = cy
+            p1 = _px_to_mm(min(xs), y, sh, sx, sy)
+            p2 = _px_to_mm(max(xs), y, sh, sx, sy)
+            orient = "h"
+        else:
+            x = cx
+            p1 = _px_to_mm(x, min(ys), sh, sx, sy)
+            p2 = _px_to_mm(x, max(ys), sh, sx, sy)
+            orient = "v"
+        # Skip tiny segments (OCR box too small to mean a dim line)
+        if math.hypot(p2[0] - p1[0], p2[1] - p1[1]) < 80:
+            continue
+        dims.append(
+            {
+                "p1": p1,
+                "p2": p2,
+                "value_mm": v,
+                "role": "ocr_box",
+                "orient": orient,
+                "source": "ocr_box",
+            }
+        )
     return dims
 
 
@@ -755,11 +915,33 @@ def _openings_from_yolo_and_arcs(
         for door in yolo.get("doors") or []:
             p1 = _px_to_mm(door["p1"][0], door["p1"][1], sh, sx, sy)
             p2 = _px_to_mm(door["p2"][0], door["p2"][1], sh, sx, sy)
-            openings.append({"kind": "door", "p1": p1, "p2": p2, "sheet": sheet_idx})
+            width_mm = None
+            if door.get("width_px") is not None:
+                width_mm = float(door["width_px"]) * ((sx + sy) * 0.5)
+            openings.append(
+                {
+                    "kind": "door",
+                    "p1": p1,
+                    "p2": p2,
+                    "width_mm": width_mm,
+                    "sheet": sheet_idx,
+                }
+            )
         for win in yolo.get("windows") or []:
             p1 = _px_to_mm(win["p1"][0], win["p1"][1], sh, sx, sy)
             p2 = _px_to_mm(win["p2"][0], win["p2"][1], sh, sx, sy)
-            openings.append({"kind": "window", "p1": p1, "p2": p2, "sheet": sheet_idx})
+            width_mm = None
+            if win.get("width_px") is not None:
+                width_mm = float(win["width_px"]) * ((sx + sy) * 0.5)
+            openings.append(
+                {
+                    "kind": "window",
+                    "p1": p1,
+                    "p2": p2,
+                    "width_mm": width_mm,
+                    "sheet": sheet_idx,
+                }
+            )
 
     for arc in arcs_px:
         center = _px_to_mm(arc["cx"], arc["cy"], sh, sx, sy)
@@ -797,8 +979,10 @@ def _openings_from_yolo_and_arcs(
 def extract_exact_trace(
     source_images: list[Path],
     use_yolo_openings: bool = True,
+    use_yolo_stairs: bool = True,
     vectorization_profile: str = "default",
     vectorization_auto_profile: bool = True,
+    use_sam: bool = False,
 ) -> dict[str, Any]:
     """Primary drawing-faithful extraction for one or more sheets."""
     from app.pipeline.ocr import extract_dimensions_and_axes
@@ -813,6 +997,7 @@ def extract_exact_trace(
     details: list[list[list[float]]] = []
     strokes: list[list[list[float]]] = []
     hatches: list[list[list[float]]] = []
+    stairs: list[list[list[float]]] = []
     openings: list[dict[str, Any]] = []
     axes: list[dict[str, Any]] = []
     dimensions: list[dict[str, Any]] = []
@@ -824,6 +1009,9 @@ def extract_exact_trace(
     scale_sources: list[str] = []
     ocr_values: list[int] = []
     scale_ratios: list[float] = []
+    ocr_rejected = 0
+    sam_refined = 0
+    underlay: dict[str, Any] | None = None
 
     resolved_profile_name = _safe_profile_name(vectorization_profile)
     active_profile_name = resolved_profile_name
@@ -853,6 +1041,18 @@ def extract_exact_trace(
         traced = _extract_strokes(bw, wall_profile)
 
         labels = extract_dimension_labels(Path(prep["ocr_path"]))
+        dims_ocr_early, _ = extract_dimensions_and_axes(
+            Path(prep["ocr_path"]),
+            ocr_to_orig=float(prep["ocr_scale"]),
+        )
+        cleaned_walls, n_rej = _reject_ocr_coincident_walls(
+            traced["walls"],
+            dims_ocr_early,
+            up=up,
+        )
+        traced["walls"] = cleaned_walls
+        ocr_rejected += n_rej
+
         # Build synthetic segments for scale calib from wall contours
         segs_px: list[tuple[int, int, int, int]] = []
         for poly in traced["walls"][:40]:
@@ -910,6 +1110,14 @@ def extract_exact_trace(
         def to_mm_poly(poly: list[list[float]]) -> list[list[float]]:
             return [_px_to_mm(p[0], p[1], sh, sx, sy) for p in poly]
 
+        if underlay is None:
+            underlay = {
+                "min": [0.0, 0.0],
+                "max": [float(sw) * sx, float(sh) * sy],
+                "sheet": sheet_idx,
+                "source": src.name,
+            }
+
         for poly in traced["walls"]:
             mm = to_mm_poly(poly)
             if len(mm) >= 2:
@@ -952,16 +1160,29 @@ def extract_exact_trace(
         # axis_marks / dims are in original pixels
         for lab in dims_ocr[:60]:
             v = int(lab.get("value_mm") or 0)
-            if v < 100:
-                continue
+            text = str(lab.get("text") or v)
+            kind = _classify_text_kind(text)
+            if kind == "dimension":
+                cleaned = (
+                    text.replace(" ", "")
+                    .replace(",", "")
+                    .replace(".", "")
+                    .replace("мм", "")
+                    .replace("mm", "")
+                )
+                if not (cleaned.isdigit() and len(cleaned) >= 2):
+                    continue
+                if v < 100 and len(cleaned) < 3:
+                    continue
             pos = _px_to_mm(lab["cx"] / up, lab["cy"] / up, sh, sx, sy)
             texts.append(
                 {
-                    "text": str(lab.get("text") or v),
+                    "text": text,
                     "pos": pos,
                     "height": max(80.0, min(sw, sh) * sx * 0.018),
                     "sheet": sheet_idx,
                     "source": "ocr",
+                    "kind": kind,
                     "rotation": float(lab.get("rotation") or 0.0),
                 }
             )
@@ -1009,32 +1230,56 @@ def extract_exact_trace(
         )
 
         yolo = None
-        if use_yolo_openings:
+        run_yolo = bool(use_yolo_openings or use_yolo_stairs)
+        if run_yolo:
             try:
                 from app.pipeline.segmentation import segment_floorplan
 
                 yolo = segment_floorplan(prep["yolo_path"], prep["orig_h"], prep["orig_w"])
             except Exception as exc:  # noqa: BLE001
-                logger.warning("YOLO openings optional skip: %s", exc)
+                logger.warning("YOLO optional skip: %s", exc)
+
+        if yolo and use_sam:
+            try:
+                from app.pipeline.sam_refiner import refine_yolo_masks_with_sam
+
+                for key in ("walls", "stairs"):
+                    masks = list(yolo.get(key) or [])
+                    if not masks:
+                        continue
+                    refined = refine_yolo_masks_with_sam(Path(prep["yolo_path"]), masks)
+                    if refined:
+                        yolo[key] = refined
+                        sam_refined += len(refined)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SAM refine skipped: %s", exc)
+
+        if yolo and use_yolo_stairs:
+            for stair in yolo.get("stairs") or []:
+                mm = to_mm_poly([[float(p[0]) / up, float(p[1]) / up] for p in stair])
+                if len(mm) >= 3:
+                    stairs.append(mm)
 
         # Scale YOLO boxes (original px) into process space for openings helper
         yolo_proc = None
-        if yolo:
+        if yolo and use_yolo_openings:
             yolo_proc = {"doors": [], "windows": []}
             for door in yolo.get("doors") or []:
-                yolo_proc["doors"].append(
-                    {
-                        "p1": [door["p1"][0] / up, door["p1"][1] / up],
-                        "p2": [door["p2"][0] / up, door["p2"][1] / up],
-                    }
-                )
+                item = {
+                    "p1": [door["p1"][0] / up, door["p1"][1] / up],
+                    "p2": [door["p2"][0] / up, door["p2"][1] / up],
+                }
+                if door.get("width_px") is not None:
+                    item["width_px"] = float(door["width_px"]) / up
+                yolo_proc["doors"].append(item)
             for win in yolo.get("windows") or []:
-                yolo_proc["windows"].append(
-                    {
-                        "p1": [win["p1"][0] / up, win["p1"][1] / up],
-                        "p2": [win["p2"][0] / up, win["p2"][1] / up],
-                    }
-                )
+                item = {
+                    "p1": [win["p1"][0] / up, win["p1"][1] / up],
+                    "p2": [win["p2"][0] / up, win["p2"][1] / up],
+                }
+                if win.get("width_px") is not None:
+                    item["width_px"] = float(win["width_px"]) / up
+                yolo_proc["windows"].append(item)
 
         openings.extend(
             _openings_from_yolo_and_arcs(
@@ -1058,6 +1303,7 @@ def extract_exact_trace(
                 "door_leaves": len(traced.get("door_leaves") or []),
                 "circles": len(traced["circles"]),
                 "hatches": len(traced["hatches"]),
+                "stairs": len(yolo.get("stairs") or []) if (yolo and use_yolo_stairs) else 0,
                 "wall_profile": wall_profile.name,
                 "scale_source": scale_source,
             }
@@ -1065,6 +1311,7 @@ def extract_exact_trace(
 
     from app.pipeline.postprocess import postprocess_walls
 
+    walls = _strip_walls_overlapping_stairs(walls, stairs)
     walls, partitions, closedness = postprocess_walls(
         walls,
         partitions,
@@ -1075,8 +1322,17 @@ def extract_exact_trace(
     for leaf in closedness.get("door_leaves") or []:
         openings.append({**leaf, "sheet": 0})
 
+    before_open = len(openings)
+    openings = _filter_openings_near_walls(openings, walls, partitions)
+    if before_open != len(openings):
+        logger.info(
+            "Openings near-wall filter: %s → %s",
+            before_open,
+            len(openings),
+        )
+
     mean_conf = sum(confidences) / max(len(confidences), 1)
-    priority = {"ocr_chain": 3, "ocr_bbox_weak": 2, "ocr": 2, "provisional": 1}
+    priority = {"ocr_box": 3, "ocr_chain": 3, "ocr_bbox_weak": 2, "ocr": 2, "provisional": 1}
     scale_source = max(scale_sources, key=lambda s: priority.get(s, 0)) if scale_sources else "provisional"
     needs_scale = mean_conf < 0.55 or scale_source in {"provisional", "ocr_bbox_weak"}
 
@@ -1087,6 +1343,7 @@ def extract_exact_trace(
         "details": details,
         "strokes": strokes,
         "hatches": hatches,
+        "stairs": stairs,
         "circles": circles,
         "openings": openings,
         "axes": axes,
@@ -1107,4 +1364,8 @@ def extract_exact_trace(
         "vectorization_auto_profile": vectorization_auto_profile,
         "closedness": {k: v for k, v in closedness.items() if k != "door_leaves"},
         "trace_note": "ortho-snapped walls; door leaves/arcs on openings",
+        "ocr_wall_blobs_rejected": ocr_rejected,
+        "sam_used": bool(use_sam and sam_refined),
+        "sam_refined": sam_refined,
+        "underlay": underlay,
     }
